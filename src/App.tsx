@@ -353,10 +353,11 @@ export default function App() {
             </div>
             <button
               type="button"
+              disabled={authLoading}
               onClick={() => void loginWithGoogle()}
-              className="min-h-[40px] rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-accent-fg hover:bg-accent-hover whitespace-nowrap shrink-0"
+              className="min-h-[40px] rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-60 whitespace-nowrap shrink-0"
             >
-              Entrar com Google
+              {authLoading ? 'Conectando...' : 'Entrar com Google'}
             </button>
           </div>
         )}

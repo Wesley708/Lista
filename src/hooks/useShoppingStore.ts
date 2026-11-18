@@ -398,6 +398,7 @@ export function useShoppingStore() {
   const itemUnsubsRef = useRef<Record<string, Unsubscribe>>({});
   const memberUnsubsRef = useRef<Record<string, Unsubscribe>>({});
   const migratingRef = useRef(false);
+  const loginInFlightRef = useRef(false);
   const migratingRecipesRef = useRef(false);
   const isLoggingOutRef = useRef(false);
   const prevUidRef = useRef<string | null>(null);
@@ -816,20 +817,40 @@ export function useShoppingStore() {
   );
 
   const loginWithGoogle = useCallback(async () => {
+    if (loginInFlightRef.current) return;
+    loginInFlightRef.current = true;
     setAuthLoading(true);
     setAuthError(null);
     try {
       await signInWithGoogle();
     } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('popup-blocked')) {
+      const combined = `${code} ${msg}`;
+
+      if (combined.includes('popup-blocked')) {
         setAuthError('O navegador bloqueou a janela de login. Permita pop-ups e tente novamente.');
-      } else if (msg.includes('popup-closed-by-user')) {
+      } else if (
+        combined.includes('popup-closed-by-user') ||
+        combined.includes('cancelled-popup-request')
+      ) {
         setAuthError(null);
+      } else if (combined.includes('network-request-failed')) {
+        setAuthError('Sem conexão para entrar com o Google. Verifique sua internet.');
+      } else if (combined.includes('unauthorized-domain')) {
+        setAuthError(
+          'Domínio não autorizado no Firebase Auth. Adicione este domínio em Authentication > Configurações > Domínios autorizados.'
+        );
+      } else if (combined.includes('web-storage-unsupported')) {
+        setAuthError('Seu navegador bloqueou cookies/armazenamento necessários para o login.');
       } else {
         setAuthError('Não foi possível entrar com o Google. Tente novamente.');
       }
     } finally {
+      loginInFlightRef.current = false;
       setAuthLoading(false);
     }
   }, []);

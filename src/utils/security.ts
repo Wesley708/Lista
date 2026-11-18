@@ -77,9 +77,12 @@ export function getSafeInviteUrl(inviteCode: string): string {
   const cleanCode = normalizeInviteCode(inviteCode);
   if (!isValidInviteCodeFormat(cleanCode)) return '';
   try {
-    const { protocol, origin } = window.location;
+    const { protocol, origin, pathname } = window.location;
     if (protocol !== 'https:' && protocol !== 'http:') return '';
-    return `${origin}/?convite=${encodeURIComponent(cleanCode)}`;
+    const safePath = pathname.endsWith('/index.html')
+      ? pathname.slice(0, -'index.html'.length)
+      : pathname;
+    return `${origin}${safePath || '/'}?convite=${encodeURIComponent(cleanCode)}`;
   } catch {
     return '';
   }

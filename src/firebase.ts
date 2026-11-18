@@ -1,5 +1,12 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  browserPopupRedirectResolver,
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  UserCredential,
+} from 'firebase/auth';
 import {
   clearIndexedDbPersistence,
   doc,
@@ -33,6 +40,7 @@ try {
 
 export const db = dbInstance;
 export const auth = getAuth(app);
+auth.useDeviceLanguage();
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -97,8 +105,20 @@ async function testConnection() {
 
 testConnection();
 
-export async function signInWithGoogle() {
-  return signInWithPopup(auth, googleProvider);
+let activeSignInPromise: Promise<UserCredential> | null = null;
+
+export async function signInWithGoogle(): Promise<UserCredential> {
+  if (activeSignInPromise) {
+    return activeSignInPromise;
+  }
+  activeSignInPromise = signInWithPopup(
+    auth,
+    googleProvider,
+    browserPopupRedirectResolver
+  ).finally(() => {
+    activeSignInPromise = null;
+  });
+  return activeSignInPromise;
 }
 
 export async function signOutUser(): Promise<boolean> {

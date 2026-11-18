@@ -19,8 +19,8 @@ function securityCspPlugin(): Plugin {
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob: https://*.googleusercontent.com https://*.gstatic.com",
-        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
-        "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com",
+        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
+        "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://apis.google.com",
         "worker-src 'self' blob:",
         "object-src 'none'",
         "base-uri 'self'",
@@ -41,8 +41,29 @@ function securityCspPlugin(): Plugin {
   };
 }
 
+function resolveBasePath(): string {
+  const explicitBase = process.env.VITE_BASE_PATH?.trim();
+  if (explicitBase) {
+    const normalized = explicitBase.startsWith('/') ? explicitBase : `/${explicitBase}`;
+    return normalized.endsWith('/') ? normalized : `${normalized}/`;
+  }
+  if (process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_REPOSITORY) {
+    const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+    if (owner && repo) {
+      if (repo.toLowerCase() === `${owner.toLowerCase()}.github.io`) {
+        return '/';
+      }
+      return `/${repo}/`;
+    }
+  }
+  return '/';
+}
+
 export default defineConfig(() => {
+  const basePath = resolveBasePath();
+
   return {
+    base: basePath,
     plugins: [
       react(),
       tailwindcss(),
@@ -58,7 +79,7 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: '/',
+          id: basePath,
           name: 'Lista de Compras',
           short_name: 'Lista de Compras',
           description:
@@ -67,25 +88,25 @@ export default defineConfig(() => {
           background_color: '#F6F6F3',
           display: 'standalone',
           orientation: 'portrait-primary',
-          start_url: '/',
-          scope: '/',
+          start_url: basePath,
+          scope: basePath,
           lang: 'pt-BR',
           categories: ['shopping', 'productivity', 'utilities'],
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: 'pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: 'pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: 'pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
