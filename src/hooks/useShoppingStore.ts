@@ -137,6 +137,11 @@ function sanitizeNumber(raw: unknown, min: number, max: number): number | null {
   return raw;
 }
 
+function isUserAuthorizedForCloud(u: User | null): u is User {
+  if (!u) return false;
+  return Boolean(u.emailVerified || u.providerData?.some((p) => p.providerId === 'google.com'));
+}
+
 interface InviteGuardState {
   fails: number;
   blockedUntil: number;
@@ -681,7 +686,7 @@ export function useShoppingStore() {
   const migrateLocalListsToCloud = useCallback(
     async (firebaseUser: User, initialLocal: ShoppingList[]) => {
       const flagKey = `sacola_migrated_${firebaseUser.uid}`;
-      if (migratingRef.current || localStorage.getItem(flagKey) || !firebaseUser.emailVerified) {
+      if (migratingRef.current || localStorage.getItem(flagKey) || !isUserAuthorizedForCloud(firebaseUser)) {
         return;
       }
       migratingRef.current = true;
@@ -998,7 +1003,7 @@ export function useShoppingStore() {
 
   const syncNow = useCallback(
     async (silent = false, explicitListId?: string) => {
-      if (!user || !user.emailVerified) return;
+      if (!isUserAuthorizedForCloud(user)) return;
       const now = Date.now();
       if (silent && now - lastSyncAttemptRef.current < 1500) {
         return;
@@ -1007,20 +1012,20 @@ export function useShoppingStore() {
       setIsRefreshingSync(true);
 
       try {
-        await enableNetwork(db);
+        await enableNetwork(db).catch(() => {});
         const listsQuery = query(
           collection(db, 'lists'),
-          where('memberIds', 'array-contains', user.uid)
+          where('memberIds', 'array-contains', user!.uid)
         );
         const targetId = explicitListId || pendingTargetListIdRef.current || activeListIdRef.current;
 
         const [listsSnap, itemsSnap, membersSnap] = await Promise.all([
-          getDocsFromServer(listsQuery),
+          getDocs(listsQuery),
           targetId && SAFE_ID_REGEX.test(targetId)
-            ? getDocsFromServer(collection(db, 'lists', targetId, 'items')).catch(() => null)
+            ? getDocs(collection(db, 'lists', targetId, 'items')).catch(() => null)
             : Promise.resolve(null),
           targetId && SAFE_ID_REGEX.test(targetId)
-            ? getDocsFromServer(collection(db, 'lists', targetId, 'members')).catch(() => null)
+            ? getDocs(collection(db, 'lists', targetId, 'members')).catch(() => null)
             : Promise.resolve(null),
         ]);
 
@@ -1094,16 +1099,16 @@ export function useShoppingStore() {
     [user, attachListSubListeners, parseCloudItemDoc, reconcileSettledOpsWithCloud]
   );
 
-  // Subscribe to Firestore lists only when authenticated with verified email
+  // Subscribe to Firestore lists only when authenticated
   useEffect(() => {
     if (!authReady || !user) {
       resetCloudSessionState(false);
       return;
     }
 
-    if (!user.emailVerified) {
+    if (!isUserAuthorizedForCloud(user)) {
       resetCloudSessionState(false);
-      setAuthError('Sua conta Google precisa estar com o e-mail verificado para sincronizar.');
+      setAuthError('Sua conta precisa estar autenticada para sincronizar.');
       return;
     }
 
@@ -1390,11 +1395,8 @@ export function useShoppingStore() {
 
   const joinListByCode = useCallback(
     async (rawCode: string): Promise<{ listName: string; alreadyMember: boolean }> => {
-      if (!user) {
+      if (!isUserAuthorizedForCloud(user)) {
         throw new Error('Entre com sua conta Google antes de aceitar o convite.');
-      }
-      if (!user.emailVerified) {
-        throw new Error('Sua conta Google precisa estar com o e-mail verificado.');
       }
 
       const guard = readInviteGuard();
@@ -1531,7 +1533,7 @@ export function useShoppingStore() {
 
   // Auto-join pending invite code once signed in with verified email
   useEffect(() => {
-    if (!authReady || !user || !user.emailVerified || !pendingInviteCode) return;
+    if (!authReady || !user || !isUserAuthorizedForCloud(user) || !pendingInviteCode) return;
     const code = pendingInviteCode;
     joiningInviteRef.current = true;
     setPendingInviteCode(null);

@@ -20,7 +20,7 @@ function securityCspPlugin(): Plugin {
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob: https://*.googleusercontent.com https://*.gstatic.com",
         "manifest-src 'self'",
-        "connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
+        "connect-src 'self' https://*.googleapis.com wss://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com wss://*.firebaseio.com https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
         "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://apis.google.com",
         "worker-src 'self' blob:",
         "object-src 'none'",

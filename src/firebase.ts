@@ -31,7 +31,6 @@ try {
       localCache: persistentLocalCache({
         tabManager: persistentMultipleTabManager(),
       }),
-      experimentalAutoDetectLongPolling: true,
     },
     firebaseConfig.firestoreDatabaseId
   );
