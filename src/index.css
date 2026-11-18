@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-canvas: var(--sacola-canvas);
+  --color-surface: var(--sacola-surface);
+  --color-surface-muted: var(--sacola-surface-muted);
+  --color-line: var(--sacola-border);
+  --color-ink: var(--sacola-text);
+  --color-ink-muted: var(--sacola-text-muted);
+  --color-accent: var(--sacola-accent);
+  --color-accent-hover: var(--sacola-accent-hover);
+  --color-accent-fg: var(--sacola-accent-fg);
+  --color-accent-ink: var(--sacola-accent-ink);
+  --color-accent-soft: var(--sacola-accent-soft);
+}
+
+@layer base {
+  :root {
+    --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+    --sacola-canvas: #F6F6F3;
+    --sacola-surface: #FFFFFF;
+    --sacola-surface-muted: #ECECE7;
+    --sacola-border: #E2E2DC;
+    --sacola-text: #18181B;
+    --sacola-text-muted: #63636B;
+
+    --sacola-accent: #2563EB;
+    --sacola-accent-hover: #1D4ED8;
+    --sacola-accent-fg: #FFFFFF;
+    --sacola-accent-ink: #1D4ED8;
+    --sacola-accent-soft: rgba(37, 99, 235, 0.12);
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+    background-color: var(--sacola-canvas);
+    color: var(--sacola-text);
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono-tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

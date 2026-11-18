@@ -1,0 +1,6 @@
+{
+  "name": "Sacola — Lista de Compras",
+  "description": "App de lista de compras para Android com organização por corredores, cálculo de orçamento em tempo real e funcionamento offline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

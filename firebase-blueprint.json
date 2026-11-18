@@ -1,0 +1,267 @@
+{
+  "entities": {
+    "ShoppingList": {
+      "title": "ShoppingList",
+      "description": "A shared shopping list synchronized across devices and household members.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name of the shopping list."
+        },
+        "budget": {
+          "type": "number",
+          "description": "Optional target budget in BRL."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the list creator."
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Short shareable code used to invite another person."
+        },
+        "memberIds": {
+          "type": "array",
+          "description": "Bounded array (max 10) of member UIDs with read/write access."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-modified timestamp."
+        }
+      },
+      "required": ["name", "ownerId", "inviteCode", "memberIds", "createdAt", "updatedAt"]
+    },
+    "ListMember": {
+      "title": "ListMember",
+      "description": "Membership record for each person participating in a shared shopping list.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the member."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name shown to collaborators."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["owner", "editor"],
+          "description": "Member role on the list."
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Invite code used when joining."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server join timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "role", "joinedAt"]
+    },
+    "ShoppingItem": {
+      "title": "ShoppingItem",
+      "description": "An individual item inside a synchronized shopping list.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Product name."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Quantity to buy."
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["un", "kg", "g", "L", "ml", "pct", "cx"],
+          "description": "Measurement unit."
+        },
+        "price": {
+          "type": "number",
+          "description": "Optional unit price in BRL."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "hortifruti",
+            "acougue",
+            "padaria",
+            "laticinios",
+            "mercearia",
+            "bebidas",
+            "limpeza",
+            "higiene",
+            "outros"
+          ],
+          "description": "Supermarket aisle category."
+        },
+        "checked": {
+          "type": "boolean",
+          "description": "Whether the item is already in the cart."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "Optional shopping note."
+        },
+        "emoji": {
+          "type": "string",
+          "maxLength": 16,
+          "description": "Optional item emoji."
+        },
+        "recipeId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Optional ID of the recipe that added this item."
+        },
+        "recipeName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Optional display name of the source recipe."
+        },
+        "addedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "UID of the user who added the item."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": ["name", "quantity", "unit", "category", "checked", "addedBy", "createdAt", "updatedAt"]
+    },
+    "Recipe": {
+      "title": "Recipe",
+      "description": "A saved cooking recipe with ingredients that can be added to or removed from a shopping list.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Recipe title (e.g., Feijoada)."
+        },
+        "emoji": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "description": "Recipe icon emoji."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Optional preparation notes or yield."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the recipe owner."
+        },
+        "ingredients": {
+          "type": "array",
+          "description": "Bounded list (1 to 30) of recipe ingredient objects."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": ["name", "emoji", "ownerId", "ingredients", "createdAt", "updatedAt"]
+    },
+    "ListInvite": {
+      "title": "ListInvite",
+      "description": "Invite lookup document mapping a short invite code to a shared list.",
+      "type": "object",
+      "properties": {
+        "listId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Target shopping list document ID."
+        },
+        "listName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Human-readable name of the target list."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "UID of the list owner."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["listId", "listName", "ownerId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/lists/{listId}": {
+      "schema": { "$ref": "#/entities/ShoppingList" },
+      "description": "Shared shopping lists accessible by their members."
+    },
+    "/lists/{listId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/ListMember" },
+      "description": "Display profiles and roles of collaborators in a list."
+    },
+    "/lists/{listId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/ShoppingItem" },
+      "description": "Line items synchronized in real time across members."
+    },
+    "/users/{userId}/recipes/{recipeId}": {
+      "schema": { "$ref": "#/entities/Recipe" },
+      "description": "Personal saved recipes synchronized across the user's devices."
+    },
+    "/invites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/ListInvite" },
+      "description": "Direct-lookup invite codes allowing a second person to join a list."
+    }
+  }
+}

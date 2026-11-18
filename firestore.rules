@@ -1,0 +1,301 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidInviteCode(code) {
+      return code is string && code.size() >= 8 && code.size() <= 16 && code.matches('^[A-Z0-9]+$');
+    }
+
+    function isListMember(listId) {
+      return request.auth.uid in get(/databases/$(database)/documents/lists/$(listId)).data.memberIds;
+    }
+
+    function isValidShoppingList(data) {
+      return data.keys().hasAll(['name', 'ownerId', 'inviteCode', 'memberIds', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['name', 'budget', 'ownerId', 'inviteCode', 'memberIds', 'createdAt', 'updatedAt'])
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && (!('budget' in data) || data.budget == null || (data.budget is number && data.budget >= 0 && data.budget <= 1000000))
+        && isValidId(data.ownerId)
+        && isValidInviteCode(data.inviteCode)
+        && data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 10
+        && isValidId(data.memberIds[0])
+        && data.ownerId in data.memberIds
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidListMember(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'joinedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'role', 'inviteCode', 'joinedAt'])
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.role in ['owner', 'editor']
+        && (!('inviteCode' in data) || isValidInviteCode(data.inviteCode))
+        && data.joinedAt is timestamp;
+    }
+
+    function isValidShoppingItem(data) {
+      return data.keys().hasAll(['name', 'quantity', 'unit', 'category', 'checked', 'addedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['name', 'quantity', 'unit', 'price', 'category', 'checked', 'note', 'emoji', 'recipeId', 'recipeName', 'addedBy', 'createdAt', 'updatedAt'])
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.quantity is number && data.quantity > 0 && data.quantity <= 10000
+        && data.unit in ['un', 'kg', 'g', 'L', 'ml', 'pct', 'cx']
+        && (!('price' in data) || data.price == null || (data.price is number && data.price >= 0 && data.price <= 1000000))
+        && data.category in ['hortifruti', 'acougue', 'padaria', 'laticinios', 'mercearia', 'bebidas', 'limpeza', 'higiene', 'outros']
+        && data.checked is bool
+        && (!('note' in data) || data.note == null || (data.note is string && data.note.size() <= 160))
+        && (!('emoji' in data) || data.emoji == null || (data.emoji is string && data.emoji.size() <= 16))
+        && (!('recipeId' in data) || data.recipeId == null || isValidId(data.recipeId))
+        && (!('recipeName' in data) || data.recipeName == null || (data.recipeName is string && data.recipeName.size() >= 1 && data.recipeName.size() <= 80))
+        && isValidId(data.addedBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidIngredient(ing) {
+      return ing is map
+        && ing.keys().hasAll(['name', 'quantity', 'unit', 'category'])
+        && ing.keys().hasOnly(['name', 'quantity', 'unit', 'category', 'emoji'])
+        && ing.name is string && ing.name.size() >= 1 && ing.name.size() <= 100
+        && ing.quantity is number && ing.quantity > 0 && ing.quantity <= 10000
+        && ing.unit in ['un', 'kg', 'g', 'L', 'ml', 'pct', 'cx']
+        && ing.category in ['hortifruti', 'acougue', 'padaria', 'laticinios', 'mercearia', 'bebidas', 'limpeza', 'higiene', 'outros']
+        && (!('emoji' in ing) || ing.emoji == null || (ing.emoji is string && ing.emoji.size() <= 16));
+    }
+
+    function isValidRecipe(data) {
+      return data.keys().hasAll(['name', 'emoji', 'ownerId', 'ingredients', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['name', 'emoji', 'notes', 'ownerId', 'ingredients', 'createdAt', 'updatedAt'])
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.emoji is string && data.emoji.size() >= 1 && data.emoji.size() <= 16
+        && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 200))
+        && isValidId(data.ownerId)
+        && data.ingredients is list && data.ingredients.size() >= 1 && data.ingredients.size() <= 30
+        && isValidIngredient(data.ingredients[0])
+        && (data.ingredients.size() < 2 || isValidIngredient(data.ingredients[1]))
+        && (data.ingredients.size() < 3 || isValidIngredient(data.ingredients[2]))
+        && (data.ingredients.size() < 4 || isValidIngredient(data.ingredients[3]))
+        && (data.ingredients.size() < 5 || isValidIngredient(data.ingredients[4]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidListInvite(data) {
+      return data.keys().hasAll(['listId', 'listName', 'ownerId', 'createdAt'])
+        && data.keys().hasOnly(['listId', 'listName', 'ownerId', 'createdAt'])
+        && isValidId(data.listId)
+        && data.listName is string && data.listName.size() >= 1 && data.listName.size() <= 80
+        && isValidId(data.ownerId)
+        && data.createdAt is timestamp;
+    }
+
+    match /lists/{listId} {
+      allow get: if isVerifiedUser() && isValidId(listId) && (request.auth.uid in existing().memberIds);
+      allow list: if isVerifiedUser() && (request.auth.uid in resource.data.memberIds);
+
+      allow create: if isVerifiedUser()
+        && isValidId(listId)
+        && isValidShoppingList(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().memberIds.size() == 1
+        && incoming().memberIds[0] == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/invites/$(incoming().inviteCode))
+        && existsAfter(/databases/$(database)/documents/lists/$(listId)/members/$(request.auth.uid));
+
+      allow update: if isVerifiedUser()
+        && isValidId(listId)
+        && isValidShoppingList(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Existing member updates list metadata (name or budget)
+          ((request.auth.uid in existing().memberIds)
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'budget', 'updatedAt']))
+          ||
+          // Action 2: Owner removes a collaborator (cannot remove owner or inject new UIDs)
+          (request.auth.uid == existing().ownerId
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            && (existing().ownerId in incoming().memberIds)
+            && existing().memberIds.hasAll(incoming().memberIds)
+            && incoming().memberIds.size() == existing().memberIds.size() - 1)
+          ||
+          // Action 3: Collaborator leaves the list (cannot leave if owner)
+          ((request.auth.uid in existing().memberIds)
+            && request.auth.uid != existing().ownerId
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            && !(request.auth.uid in incoming().memberIds)
+            && existing().memberIds.hasAll(incoming().memberIds)
+            && incoming().memberIds.size() == existing().memberIds.size() - 1)
+          ||
+          // Action 4: New user joins atomically via valid invite code (blocks stale member doc reuse)
+          (!(request.auth.uid in existing().memberIds)
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            && incoming().memberIds.size() == existing().memberIds.size() + 1
+            && incoming().memberIds.size() <= 10
+            && incoming().memberIds.hasAll(existing().memberIds)
+            && incoming().memberIds.hasOnly(existing().memberIds.concat([request.auth.uid]))
+            && !exists(/databases/$(database)/documents/lists/$(listId)/members/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/lists/$(listId)/members/$(request.auth.uid))
+            && getAfter(/databases/$(database)/documents/lists/$(listId)/members/$(request.auth.uid)).data.inviteCode == existing().inviteCode)
+          ||
+          // Action 5: Owner rotates invite code atomically (creates new invite and revokes old invite)
+          (request.auth.uid == existing().ownerId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['inviteCode', 'updatedAt'])
+            && incoming().inviteCode != existing().inviteCode
+            && existsAfter(/databases/$(database)/documents/invites/$(incoming().inviteCode))
+            && !existsAfter(/databases/$(database)/documents/invites/$(existing().inviteCode)))
+        );
+
+      allow delete: if isVerifiedUser()
+        && isValidId(listId)
+        && existing().ownerId == request.auth.uid;
+
+      match /members/{memberId} {
+        allow get: if isVerifiedUser() && isValidId(listId) && isValidId(memberId) && isListMember(listId);
+        allow list: if isVerifiedUser() && isValidId(listId) && isListMember(listId);
+
+        allow create: if isVerifiedUser()
+          && isValidId(listId)
+          && isValidId(memberId)
+          && isValidListMember(incoming())
+          && memberId == request.auth.uid
+          && incoming().uid == request.auth.uid
+          && incoming().joinedAt == request.time
+          && (
+            (incoming().role == 'owner'
+              && getAfter(/databases/$(database)/documents/lists/$(listId)).data.ownerId == request.auth.uid)
+            ||
+            (incoming().role == 'editor'
+              && ('inviteCode' in incoming())
+              && exists(/databases/$(database)/documents/invites/$(incoming().inviteCode))
+              && get(/databases/$(database)/documents/invites/$(incoming().inviteCode)).data.listId == listId
+              && getAfter(/databases/$(database)/documents/lists/$(listId)).data.memberIds.hasAll([request.auth.uid]))
+          );
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser()
+          && isValidId(listId)
+          && isValidId(memberId)
+          && (memberId == request.auth.uid
+              || get(/databases/$(database)/documents/lists/$(listId)).data.ownerId == request.auth.uid)
+          && (memberId != get(/databases/$(database)/documents/lists/$(listId)).data.ownerId
+              || !existsAfter(/databases/$(database)/documents/lists/$(listId)))
+          && (!existsAfter(/databases/$(database)/documents/lists/$(listId))
+              || !(memberId in getAfter(/databases/$(database)/documents/lists/$(listId)).data.memberIds));
+      }
+
+      match /items/{itemId} {
+        allow get: if isVerifiedUser() && isValidId(listId) && isValidId(itemId) && isListMember(listId);
+        allow list: if isVerifiedUser() && isValidId(listId) && isListMember(listId);
+
+        allow create: if isVerifiedUser()
+          && isValidId(listId)
+          && isValidId(itemId)
+          && isValidShoppingItem(incoming())
+          && isListMember(listId)
+          && incoming().addedBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update: if isVerifiedUser()
+          && isValidId(listId)
+          && isValidId(itemId)
+          && isValidShoppingItem(incoming())
+          && isListMember(listId)
+          && incoming().addedBy == existing().addedBy
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'quantity', 'unit', 'price', 'category', 'checked', 'note', 'emoji', 'recipeId', 'recipeName', 'updatedAt'
+          ]);
+
+        allow delete: if isVerifiedUser()
+          && isValidId(listId)
+          && isValidId(itemId)
+          && isListMember(listId);
+      }
+    }
+
+    match /users/{userId}/recipes/{recipeId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && isValidId(recipeId) && userId == request.auth.uid;
+      allow list: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidId(recipeId)
+        && userId == request.auth.uid
+        && isValidRecipe(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidId(recipeId)
+        && userId == request.auth.uid
+        && isValidRecipe(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'emoji', 'notes', 'ingredients', 'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidId(recipeId)
+        && userId == request.auth.uid;
+    }
+
+    match /invites/{inviteCode} {
+      allow get: if isVerifiedUser() && isValidInviteCode(inviteCode);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidInviteCode(inviteCode)
+        && isValidListInvite(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && getAfter(/databases/$(database)/documents/lists/$(incoming().listId)).data.ownerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/lists/$(incoming().listId)).data.inviteCode == inviteCode;
+
+      allow update: if false;
+
+      allow delete: if isVerifiedUser()
+        && isValidInviteCode(inviteCode)
+        && existing().ownerId == request.auth.uid;
+    }
+  }
+}
