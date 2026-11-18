@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AlertTriangle, Check, RotateCcw, Share2, Trash2 } from 'lucide-react';
 import { formatBRL } from '../data/catalog';
 import { ShoppingList } from '../types/shopping';
+import { parseBoundedBudget } from '../utils/security';
 
 interface ListSummaryCardProps {
   list: ShoppingList;
@@ -41,12 +42,11 @@ export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
 
   const handleSaveBudget = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = budgetInput.trim().replace(',', '.');
-    if (!cleaned) {
+    if (!budgetInput.trim()) {
       onUpdateBudget(null);
     } else {
-      const val = Number(cleaned);
-      if (!Number.isNaN(val) && val > 0) {
+      const val = parseBoundedBudget(budgetInput);
+      if (val !== null) {
         onUpdateBudget(val);
       }
     }
@@ -120,6 +120,7 @@ export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
             <input
               type="text"
               inputMode="decimal"
+              maxLength={12}
               autoFocus
               value={budgetInput}
               onChange={(e) => setBudgetInput(e.target.value)}

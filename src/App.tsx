@@ -34,6 +34,7 @@ import { CATEGORY_MAP, formatBRL } from './data/catalog';
 import { useShoppingStore } from './hooks/useShoppingStore';
 import { AppTab, CategoryId, FilterMode, Recipe, ShoppingItem } from './types/shopping';
 import { triggerLightFeedback } from './utils/haptics';
+import { sanitizeText } from './utils/security';
 
 export default function App() {
   const {
@@ -262,7 +263,7 @@ export default function App() {
 
   const handleInlineAdd = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = inlineName.trim();
+    const cleaned = sanitizeText(inlineName, 100);
     if (!cleaned) return;
     void addItem({ name: cleaned });
     setInlineName('');
@@ -574,6 +575,7 @@ export default function App() {
                   />
                   <input
                     type="search"
+                    maxLength={100}
                     value={listSearch}
                     onChange={(e) => setListSearch(e.target.value)}
                     placeholder="Filtrar itens nesta lista..."
@@ -597,8 +599,8 @@ export default function App() {
               {filteredItems.length === 0 ? (
                 <div className="rounded-2xl border border-line bg-surface p-7 text-center">
                   <p className="text-sm font-medium text-ink">
-                    {listSearch.trim()
-                      ? `Nenhum item encontrado para "${listSearch.trim()}".`
+                    {sanitizeText(listSearch, 100)
+                      ? `Nenhum item encontrado para "${sanitizeText(listSearch, 100)}".`
                       : activeList.items.length === 0
                         ? 'Esta lista está vazia.'
                         : filterMode === 'pending'
@@ -795,10 +797,10 @@ export default function App() {
               setActiveListId(id);
               setActiveTab('lista');
             }}
-            onCreateList={(name, budget) => void createList(name, budget)}
-            onRenameList={(id, name, budget) => void renameList(id, name, budget)}
-            onDuplicateList={(id) => void duplicateList(id)}
-            onDeleteList={(id) => void deleteList(id)}
+            onCreateList={(name, budget) => createList(name, budget)}
+            onRenameList={(id, name, budget) => renameList(id, name, budget)}
+            onDuplicateList={(id) => duplicateList(id)}
+            onDeleteList={(id) => deleteList(id)}
           />
         )}
 

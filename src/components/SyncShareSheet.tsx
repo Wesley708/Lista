@@ -14,8 +14,8 @@ import {
 import { AnimatePresence, motion } from 'motion/react';
 import { ShoppingList } from '../types/shopping';
 import {
+  extractInviteCode,
   getSafeInviteUrl,
-  normalizeInviteCode,
   sanitizeShareLine,
 } from '../utils/security';
 
@@ -59,6 +59,7 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [confirmRemoveUid, setConfirmRemoveUid] = useState<string | null>(null);
+  const [removingUid, setRemovingUid] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -140,7 +141,7 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
 
   const handleJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteInput.trim()) return;
+    if (joining || !inviteInput.trim()) return;
     setJoining(true);
     setFeedback(null);
     try {
@@ -390,13 +391,18 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
                                   </button>
                                   <button
                                     type="button"
+                                    disabled={removingUid === m.uid}
                                     onClick={() => {
-                                      void onRemoveMember(activeList.id, m.uid);
-                                      setConfirmRemoveUid(null);
+                                      if (removingUid) return;
+                                      setRemovingUid(m.uid);
+                                      void onRemoveMember(activeList.id, m.uid).finally(() => {
+                                        setRemovingUid(null);
+                                        setConfirmRemoveUid(null);
+                                      });
                                     }}
-                                    className="min-h-[34px] rounded-lg bg-red-600 px-2.5 font-semibold text-white hover:bg-red-700"
+                                    className="min-h-[34px] rounded-lg bg-red-600 px-2.5 font-semibold text-white hover:bg-red-700 disabled:opacity-50"
                                   >
-                                    Remover
+                                    {removingUid === m.uid ? 'Removendo...' : 'Remover'}
                                   </button>
                                 </div>
                               ) : (
@@ -433,9 +439,9 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
                       id="join-invite-code"
                       type="text"
                       value={inviteInput}
-                      onChange={(e) => setInviteInput(normalizeInviteCode(e.target.value))}
-                      placeholder="Código do convite"
-                      maxLength={16}
+                      onChange={(e) => setInviteInput(extractInviteCode(e.target.value))}
+                      placeholder="Código ou link do convite"
+                      maxLength={256}
                       className="min-h-[48px] flex-1 rounded-xl border border-line bg-canvas px-3.5 font-mono-tabular text-sm uppercase tracking-wider text-ink placeholder:normal-case placeholder:tracking-normal placeholder:text-ink-muted/60 focus:border-accent focus:outline-none"
                     />
                     <button

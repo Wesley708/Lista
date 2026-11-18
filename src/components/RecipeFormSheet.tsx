@@ -10,6 +10,11 @@ import {
   detectItemEmoji,
 } from '../data/catalog';
 import { CategoryId, Recipe, RecipeIngredient, UnitType } from '../types/shopping';
+import {
+  MAX_ITEM_QUANTITY,
+  parseBoundedQuantity,
+  sanitizeText,
+} from '../utils/security';
 
 interface RecipeFormSheetProps {
   open: boolean;
@@ -97,7 +102,7 @@ export const RecipeFormSheet: React.FC<RecipeFormSheetProps> = ({
     : '🥄';
 
   const handleAddIngredient = () => {
-    const trimmed = ingName.trim();
+    const trimmed = sanitizeText(ingName, 100);
     if (!trimmed) {
       setErrorMsg('Digite o nome do ingrediente antes de incluir.');
       ingInputRef.current?.focus();
@@ -109,8 +114,8 @@ export const RecipeFormSheet: React.FC<RecipeFormSheetProps> = ({
     }
     const category = ingCatTouched ? ingCategory : detectCategory(trimmed);
     const nextIng: RecipeIngredient = {
-      name: trimmed.slice(0, 100),
-      quantity: Math.min(10000, Math.max(0.1, Number(ingQty) || 1)),
+      name: trimmed,
+      quantity: parseBoundedQuantity(ingQty, 1),
       unit: ingUnit,
       category,
       emoji: detectItemEmoji(trimmed, category),
@@ -134,22 +139,22 @@ export const RecipeFormSheet: React.FC<RecipeFormSheetProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = name.trim();
+    const cleanName = sanitizeText(name, 80);
     if (!cleanName) {
       setErrorMsg('Dê um nome para a receita.');
       return;
     }
 
     const finalIngredients = [...ingredients];
-    if (ingName.trim() && finalIngredients.length < 30) {
-      const trimmed = ingName.trim();
-      const cat = ingCatTouched ? ingCategory : detectCategory(trimmed);
+    const extraIngName = sanitizeText(ingName, 100);
+    if (extraIngName && finalIngredients.length < 30) {
+      const cat = ingCatTouched ? ingCategory : detectCategory(extraIngName);
       finalIngredients.push({
-        name: trimmed.slice(0, 100),
-        quantity: Math.min(10000, Math.max(0.1, Number(ingQty) || 1)),
+        name: extraIngName,
+        quantity: parseBoundedQuantity(ingQty, 1),
         unit: ingUnit,
         category: cat,
-        emoji: detectItemEmoji(trimmed, cat),
+        emoji: detectItemEmoji(extraIngName, cat),
       });
     }
 
@@ -163,7 +168,7 @@ export const RecipeFormSheet: React.FC<RecipeFormSheetProps> = ({
       id: editingRecipe?.id,
       name: cleanName,
       emoji,
-      notes: notes.trim() || undefined,
+      notes: sanitizeText(notes, 200) || undefined,
       ingredients: finalIngredients,
     });
     onClose();
@@ -369,8 +374,9 @@ export const RecipeFormSheet: React.FC<RecipeFormSheetProps> = ({
                         type="number"
                         step="any"
                         min="0.1"
+                        max={MAX_ITEM_QUANTITY}
                         value={ingQty}
-                        onChange={(e) => setIngQty(Math.max(0.1, Number(e.target.value) || 1))}
+                        onChange={(e) => setIngQty(parseBoundedQuantity(e.target.value, 1))}
                         aria-label="Quantidade do ingrediente"
                         className="col-span-4 min-h-[44px] rounded-xl border border-line bg-canvas px-2.5 text-center font-mono-tabular text-sm text-ink focus:border-accent focus:outline-none"
                       />

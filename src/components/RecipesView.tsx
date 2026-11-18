@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronUp, Pencil, Plus, Search, Trash2, X } from '
 import { AnimatePresence, motion } from 'motion/react';
 import { detectItemEmoji } from '../data/catalog';
 import { Recipe, ShoppingItem } from '../types/shopping';
+import { sanitizeText } from '../utils/security';
 
 interface RecipesViewProps {
   activeListName: string;
@@ -80,6 +81,7 @@ export const RecipesView: React.FC<RecipesViewProps> = ({
           />
           <input
             type="search"
+            maxLength={100}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar receita ou ingrediente..."
@@ -103,8 +105,8 @@ export const RecipesView: React.FC<RecipesViewProps> = ({
       {filtered.length === 0 ? (
         <div className="rounded-2xl border border-line bg-surface p-8 text-center">
           <p className="text-sm font-medium text-ink">
-            {search.trim()
-              ? `Nenhuma receita encontrada para "${search.trim()}".`
+            {sanitizeText(search, 100)
+              ? `Nenhuma receita encontrada para "${sanitizeText(search, 100)}".`
               : 'Você ainda não cadastrou nenhuma receita.'}
           </p>
           <div className="mt-4 flex justify-center">

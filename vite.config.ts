@@ -19,7 +19,8 @@ function securityCspPlugin(): Plugin {
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob: https://*.googleusercontent.com https://*.gstatic.com",
-        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
+        "manifest-src 'self'",
+        "connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com",
         "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://apis.google.com",
         "worker-src 'self' blob:",
         "object-src 'none'",
@@ -116,7 +117,7 @@ export default defineConfig(() => {
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/__\/auth/, /^\/api\//],
+          navigateFallbackDenylist: [/^\/__\/auth/, /^\/__\/firebase/, /^\/api\//],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

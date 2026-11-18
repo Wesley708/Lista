@@ -34,6 +34,22 @@ service cloud.firestore {
       return request.auth.uid in get(/databases/$(database)/documents/lists/$(listId)).data.memberIds;
     }
 
+    function isValidMemberIds(ids) {
+      return ids is list
+        && ids.size() >= 1
+        && ids.size() <= 10
+        && isValidId(ids[0])
+        && (ids.size() < 2 || isValidId(ids[1]))
+        && (ids.size() < 3 || isValidId(ids[2]))
+        && (ids.size() < 4 || isValidId(ids[3]))
+        && (ids.size() < 5 || isValidId(ids[4]))
+        && (ids.size() < 6 || isValidId(ids[5]))
+        && (ids.size() < 7 || isValidId(ids[6]))
+        && (ids.size() < 8 || isValidId(ids[7]))
+        && (ids.size() < 9 || isValidId(ids[8]))
+        && (ids.size() < 10 || isValidId(ids[9]));
+    }
+
     function isValidShoppingList(data) {
       return data.keys().hasAll(['name', 'ownerId', 'inviteCode', 'memberIds', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['name', 'budget', 'ownerId', 'inviteCode', 'memberIds', 'createdAt', 'updatedAt'])
@@ -41,8 +57,7 @@ service cloud.firestore {
         && (!('budget' in data) || data.budget == null || (data.budget is number && data.budget >= 0 && data.budget <= 1000000))
         && isValidId(data.ownerId)
         && isValidInviteCode(data.inviteCode)
-        && data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 10
-        && isValidId(data.memberIds[0])
+        && isValidMemberIds(data.memberIds)
         && data.ownerId in data.memberIds
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -67,8 +82,8 @@ service cloud.firestore {
         && (!('price' in data) || data.price == null || (data.price is number && data.price >= 0 && data.price <= 1000000))
         && data.category in ['hortifruti', 'acougue', 'padaria', 'laticinios', 'mercearia', 'bebidas', 'limpeza', 'higiene', 'outros']
         && data.checked is bool
-        && (!('note' in data) || data.note == null || (data.note is string && data.note.size() <= 160))
-        && (!('emoji' in data) || data.emoji == null || (data.emoji is string && data.emoji.size() <= 16))
+        && (!('note' in data) || data.note == null || (data.note is string && data.note.size() >= 1 && data.note.size() <= 160))
+        && (!('emoji' in data) || data.emoji == null || (data.emoji is string && data.emoji.size() >= 1 && data.emoji.size() <= 16))
         && (!('recipeId' in data) || data.recipeId == null || isValidId(data.recipeId))
         && (!('recipeName' in data) || data.recipeName == null || (data.recipeName is string && data.recipeName.size() >= 1 && data.recipeName.size() <= 80))
         && isValidId(data.addedBy)
@@ -84,7 +99,46 @@ service cloud.firestore {
         && ing.quantity is number && ing.quantity > 0 && ing.quantity <= 10000
         && ing.unit in ['un', 'kg', 'g', 'L', 'ml', 'pct', 'cx']
         && ing.category in ['hortifruti', 'acougue', 'padaria', 'laticinios', 'mercearia', 'bebidas', 'limpeza', 'higiene', 'outros']
-        && (!('emoji' in ing) || ing.emoji == null || (ing.emoji is string && ing.emoji.size() <= 16));
+        && (!('emoji' in ing) || ing.emoji == null || (ing.emoji is string && ing.emoji.size() >= 1 && ing.emoji.size() <= 16));
+    }
+
+    function isValidIngredientsFirst10(ings) {
+      return isValidIngredient(ings[0])
+        && (ings.size() < 2 || isValidIngredient(ings[1]))
+        && (ings.size() < 3 || isValidIngredient(ings[2]))
+        && (ings.size() < 4 || isValidIngredient(ings[3]))
+        && (ings.size() < 5 || isValidIngredient(ings[4]))
+        && (ings.size() < 6 || isValidIngredient(ings[5]))
+        && (ings.size() < 7 || isValidIngredient(ings[6]))
+        && (ings.size() < 8 || isValidIngredient(ings[7]))
+        && (ings.size() < 9 || isValidIngredient(ings[8]))
+        && (ings.size() < 10 || isValidIngredient(ings[9]));
+    }
+
+    function isValidIngredientsMid10(ings) {
+      return (ings.size() < 11 || isValidIngredient(ings[10]))
+        && (ings.size() < 12 || isValidIngredient(ings[11]))
+        && (ings.size() < 13 || isValidIngredient(ings[12]))
+        && (ings.size() < 14 || isValidIngredient(ings[13]))
+        && (ings.size() < 15 || isValidIngredient(ings[14]))
+        && (ings.size() < 16 || isValidIngredient(ings[15]))
+        && (ings.size() < 17 || isValidIngredient(ings[16]))
+        && (ings.size() < 18 || isValidIngredient(ings[17]))
+        && (ings.size() < 19 || isValidIngredient(ings[18]))
+        && (ings.size() < 20 || isValidIngredient(ings[19]));
+    }
+
+    function isValidIngredientsLast10(ings) {
+      return (ings.size() < 21 || isValidIngredient(ings[20]))
+        && (ings.size() < 22 || isValidIngredient(ings[21]))
+        && (ings.size() < 23 || isValidIngredient(ings[22]))
+        && (ings.size() < 24 || isValidIngredient(ings[23]))
+        && (ings.size() < 25 || isValidIngredient(ings[24]))
+        && (ings.size() < 26 || isValidIngredient(ings[25]))
+        && (ings.size() < 27 || isValidIngredient(ings[26]))
+        && (ings.size() < 28 || isValidIngredient(ings[27]))
+        && (ings.size() < 29 || isValidIngredient(ings[28]))
+        && (ings.size() < 30 || isValidIngredient(ings[29]));
     }
 
     function isValidRecipe(data) {
@@ -92,14 +146,12 @@ service cloud.firestore {
         && data.keys().hasOnly(['name', 'emoji', 'notes', 'ownerId', 'ingredients', 'createdAt', 'updatedAt'])
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
         && data.emoji is string && data.emoji.size() >= 1 && data.emoji.size() <= 16
-        && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 200))
+        && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() >= 1 && data.notes.size() <= 200))
         && isValidId(data.ownerId)
         && data.ingredients is list && data.ingredients.size() >= 1 && data.ingredients.size() <= 30
-        && isValidIngredient(data.ingredients[0])
-        && (data.ingredients.size() < 2 || isValidIngredient(data.ingredients[1]))
-        && (data.ingredients.size() < 3 || isValidIngredient(data.ingredients[2]))
-        && (data.ingredients.size() < 4 || isValidIngredient(data.ingredients[3]))
-        && (data.ingredients.size() < 5 || isValidIngredient(data.ingredients[4]))
+        && isValidIngredientsFirst10(data.ingredients)
+        && isValidIngredientsMid10(data.ingredients)
+        && isValidIngredientsLast10(data.ingredients)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }

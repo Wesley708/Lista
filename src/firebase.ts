@@ -88,7 +88,7 @@ export function reportFirestoreError(
         })) || [],
     },
     operationType,
-    path,
+    path: path ? redactPII(path) : null,
   };
   console.error('Firestore Error:', JSON.stringify(errInfo));
 

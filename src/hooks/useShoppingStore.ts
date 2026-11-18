@@ -59,10 +59,15 @@ import {
 
 import {
   MAX_BACKUP_FILE_BYTES,
+  MAX_ITEM_QUANTITY,
+  MAX_MONEY_AMOUNT,
+  MIN_ITEM_QUANTITY,
+  extractInviteCode,
   isPlainRecord,
   isValidInviteCodeFormat,
   normalizeInviteCode,
   safeJsonParse,
+  sanitizeOptionalText,
   sanitizeShareLine,
   sanitizeText,
 } from '../utils/security';
@@ -130,6 +135,67 @@ function sanitizeNumber(raw: unknown, min: number, max: number): number | null {
   if (raw < min) return min;
   if (raw > max) return max;
   return raw;
+}
+
+interface InviteGuardState {
+  fails: number;
+  blockedUntil: number;
+}
+
+function readInviteGuard(): InviteGuardState {
+  const candidates: InviteGuardState[] = [];
+  for (const storage of [sessionStorage, localStorage]) {
+    try {
+      const saved = storage.getItem(INVITE_GUARD_KEY);
+      if (!saved) continue;
+      const parsed = safeJsonParse(saved, 1024);
+      if (isPlainRecord(parsed)) {
+        candidates.push({
+          fails:
+            typeof parsed.fails === 'number' && Number.isFinite(parsed.fails) && parsed.fails >= 0
+              ? Math.floor(parsed.fails)
+              : 0,
+          blockedUntil:
+            typeof parsed.blockedUntil === 'number' &&
+            Number.isFinite(parsed.blockedUntil) &&
+            parsed.blockedUntil >= 0
+              ? parsed.blockedUntil
+              : 0,
+        });
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+  if (candidates.length === 0) return { fails: 0, blockedUntil: 0 };
+  return candidates.reduce(
+    (acc, cur) => ({
+      fails: Math.max(acc.fails, cur.fails),
+      blockedUntil: Math.max(acc.blockedUntil, cur.blockedUntil),
+    }),
+    { fails: 0, blockedUntil: 0 }
+  );
+}
+
+function writeInviteGuard(state: InviteGuardState): void {
+  const serialized = JSON.stringify(state);
+  for (const storage of [sessionStorage, localStorage]) {
+    try {
+      storage.setItem(INVITE_GUARD_KEY, serialized);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function clearInviteGuard(): void {
+  for (const storage of [sessionStorage, localStorage]) {
+    try {
+      storage.removeItem(INVITE_GUARD_KEY);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function sanitizeShoppingItem(raw: unknown): ShoppingItem | null {
@@ -507,32 +573,46 @@ export function useShoppingStore() {
     }
   }, [activeListId]);
 
+  const resetCloudSessionState = useCallback((clearApplied = false) => {
+    Object.values(itemUnsubsRef.current).forEach((u) => u());
+    Object.values(memberUnsubsRef.current).forEach((u) => u());
+    itemUnsubsRef.current = {};
+    memberUnsubsRef.current = {};
+    pendingWritesBySourceRef.current = {};
+    cloudListsMapRef.current = {};
+    cloudItemsMapRef.current = {};
+    optimisticOpsRef.current = {};
+    pendingTargetListIdRef.current = null;
+    joiningInviteRef.current = false;
+    lastSyncAttemptRef.current = 0;
+    setCloudListsMap({});
+    setCloudItemsMap({});
+    setCloudMembersMap({});
+    setCloudRecipes(null);
+    setOptimisticOpsByList({});
+    setHasPendingCloudWrites(false);
+    setSyncError(null);
+    if (clearApplied) {
+      setAppliedRecipesMap({});
+    }
+  }, []);
+
   // Listen to Firebase Auth state and isolate account transitions
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (firebaseUser) => {
       const nextUid = firebaseUser?.uid ?? null;
       if (prevUidRef.current !== null && prevUidRef.current !== nextUid) {
-        Object.values(itemUnsubsRef.current).forEach((u) => u());
-        Object.values(memberUnsubsRef.current).forEach((u) => u());
-        itemUnsubsRef.current = {};
-        memberUnsubsRef.current = {};
-        setCloudListsMap({});
-        setCloudItemsMap({});
-        setCloudMembersMap({});
-        setCloudRecipes(null);
+        resetCloudSessionState(true);
       }
       prevUidRef.current = nextUid;
       setUser(firebaseUser);
       setAuthReady(true);
       if (!firebaseUser) {
-        setCloudListsMap({});
-        setCloudItemsMap({});
-        setCloudMembersMap({});
-        setCloudRecipes(null);
+        resetCloudSessionState(false);
       }
     });
     return unsub;
-  }, []);
+  }, [resetCloudSessionState]);
 
   const migrateLocalRecipesToCloud = useCallback(
     async (firebaseUser: User, initialLocalRecipes: Recipe[]) => {
@@ -547,28 +627,50 @@ export function useShoppingStore() {
       migratingRecipesRef.current = true;
       try {
         const batch = writeBatch(db);
+        let recipeOps = 0;
         for (const r of initialLocalRecipes.slice(0, 30)) {
+          const cleanRecipeName = sanitizeText(r.name, 80) || 'Receita';
+          const cleanEmoji = sanitizeText(r.emoji, 16) || '🍲';
+          const cleanNotes = sanitizeOptionalText(r.notes, 200) ?? null;
+          const cleanIngredients = r.ingredients
+            .slice(0, 30)
+            .map((ing) => {
+              const ingName = sanitizeText(ing.name, 100);
+              const cat = sanitizeCategory(ing.category, ingName);
+              return {
+                name: ingName,
+                quantity: Math.min(
+                  MAX_ITEM_QUANTITY,
+                  Math.max(MIN_ITEM_QUANTITY, Number(ing.quantity) || 1)
+                ),
+                unit: sanitizeUnit(ing.unit),
+                category: cat,
+                emoji: sanitizeText(ing.emoji, 16) || detectItemEmoji(ingName, cat),
+              };
+            })
+            .filter((ing) => ing.name.length > 0);
+          if (cleanIngredients.length === 0) continue;
+
           const recipeId = sanitizeId(r.id, 'receita');
           batch.set(doc(db, 'users', firebaseUser.uid, 'recipes', recipeId), {
-            name: r.name.trim().slice(0, 80) || 'Receita',
-            emoji: (r.emoji || '🍲').slice(0, 16),
-            notes: r.notes ? r.notes.trim().slice(0, 200) : null,
+            name: cleanRecipeName,
+            emoji: cleanEmoji,
+            notes: cleanNotes,
             ownerId: firebaseUser.uid,
-            ingredients: r.ingredients.slice(0, 30).map((ing) => ({
-              name: ing.name.trim().slice(0, 100),
-              quantity: Math.min(10000, Math.max(0.1, Number(ing.quantity) || 1)),
-              unit: sanitizeUnit(ing.unit),
-              category: sanitizeCategory(ing.category, ing.name),
-              emoji: (ing.emoji || detectItemEmoji(ing.name, ing.category)).slice(0, 16),
-            })),
+            ingredients: cleanIngredients,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
+          recipeOps++;
         }
-        await batch.commit();
+        if (recipeOps > 0) {
+          await batch.commit();
+        }
         localStorage.setItem(flagKey, '1');
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}/recipes`);
+        setSyncError(
+          reportFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}/recipes`)
+        );
       } finally {
         migratingRecipesRef.current = false;
       }
@@ -585,23 +687,23 @@ export function useShoppingStore() {
       migratingRef.current = true;
 
       try {
-        const displayName = (
-          firebaseUser.displayName ||
-          firebaseUser.email?.split('@')[0] ||
-          'Você'
-        ).slice(0, 80);
+        const displayName =
+          sanitizeText(firebaseUser.displayName || firebaseUser.email?.split('@')[0], 80) ||
+          'Você';
 
         for (const localList of initialLocal.slice(0, 30)) {
           const listId = generateSafeId('list');
           const inviteCode = generateInviteCode();
-          const listName = localList.name.trim().slice(0, 80) || 'Lista de compras';
+          const listName = sanitizeText(localList.name, 80) || 'Lista de compras';
 
           const headerBatch = writeBatch(db);
           headerBatch.set(doc(db, 'lists', listId), {
             name: listName,
             budget:
-              localList.budget !== null && localList.budget >= 0
-                ? Math.min(1000000, localList.budget)
+              localList.budget !== null &&
+              Number.isFinite(localList.budget) &&
+              localList.budget >= 0
+                ? Math.min(MAX_MONEY_AMOUNT, localList.budget)
                 : null,
             ownerId: firebaseUser.uid,
             inviteCode,
@@ -627,7 +729,8 @@ export function useShoppingStore() {
           try {
             await headerBatch.commit();
           } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `lists/${listId}`);
+            setSyncError(reportFirestoreError(err, OperationType.WRITE, `lists/${listId}`));
+            return;
           }
 
           const itemsToMigrate = localList.items.slice(0, 500);
@@ -635,21 +738,26 @@ export function useShoppingStore() {
             const itemBatch = writeBatch(db);
             for (const item of itemsToMigrate.slice(i, i + MAX_BATCH_OPS)) {
               const itemId = generateSafeId('item');
-              const cleanName = item.name.trim().slice(0, 100) || 'Item';
+              const cleanName = sanitizeText(item.name, 100) || 'Item';
               const cleanCat = sanitizeCategory(item.category, cleanName);
               const cleanUnit = sanitizeUnit(item.unit);
+              const cleanNote = sanitizeOptionalText(item.note, 160) ?? null;
+              const cleanEmoji = sanitizeText(item.emoji, 16) || detectItemEmoji(cleanName, cleanCat);
               itemBatch.set(doc(db, 'lists', listId, 'items', itemId), {
                 name: cleanName,
-                quantity: Math.min(10000, Math.max(0.1, Number(item.quantity) || 1)),
+                quantity: Math.min(
+                  MAX_ITEM_QUANTITY,
+                  Math.max(MIN_ITEM_QUANTITY, Number(item.quantity) || 1)
+                ),
                 unit: cleanUnit,
                 price:
-                  item.price !== null && item.price >= 0
-                    ? Math.min(1000000, Number(item.price))
+                  item.price !== null && Number.isFinite(item.price) && item.price >= 0
+                    ? Math.min(MAX_MONEY_AMOUNT, Number(item.price))
                     : null,
                 category: cleanCat,
                 checked: Boolean(item.checked),
-                note: item.note ? item.note.trim().slice(0, 160) : null,
-                emoji: (item.emoji || detectItemEmoji(cleanName, cleanCat)).slice(0, 16),
+                note: cleanNote,
+                emoji: cleanEmoji,
                 addedBy: firebaseUser.uid,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
@@ -658,7 +766,10 @@ export function useShoppingStore() {
             try {
               await itemBatch.commit();
             } catch (err) {
-              handleFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`);
+              setSyncError(
+                reportFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`)
+              );
+              return;
             }
           }
         }
@@ -784,30 +895,46 @@ export function useShoppingStore() {
 
   const parseCloudItemDoc = useCallback((itemDoc: { id: string; data: (opts?: { serverTimestamps?: 'estimate' | 'previous' | 'none' }) => Record<string, unknown> }): ShoppingItem => {
     const d = itemDoc.data({ serverTimestamps: 'estimate' });
-    const name = String(d.name ?? '');
-    const category = (d.category as CategoryId) ?? 'outros';
+    const name = sanitizeText(d.name, 100) || 'Item';
+    const category = sanitizeCategory(d.category, name);
+    const unit = sanitizeUnit(d.unit);
+    const quantity = sanitizeNumber(d.quantity, MIN_ITEM_QUANTITY, MAX_ITEM_QUANTITY) ?? 1;
+    const price =
+      typeof d.price === 'number' && Number.isFinite(d.price) && d.price >= 0
+        ? Math.min(MAX_MONEY_AMOUNT, d.price)
+        : null;
+    const cleanNote = sanitizeOptionalText(d.note, 160);
+    const cleanEmoji = sanitizeText(d.emoji, 16) || detectItemEmoji(name, category);
+    const recipeId =
+      typeof d.recipeId === 'string' && SAFE_ID_REGEX.test(d.recipeId.trim())
+        ? d.recipeId.trim().slice(0, 128)
+        : undefined;
+    const recipeName = sanitizeOptionalText(d.recipeName, 80);
+    const addedBy =
+      typeof d.addedBy === 'string' && SAFE_ID_REGEX.test(d.addedBy.trim())
+        ? d.addedBy.trim().slice(0, 128)
+        : undefined;
+
     return {
       id: itemDoc.id,
       name,
-      quantity: Number(d.quantity ?? 1),
-      unit: (d.unit as UnitType) ?? 'un',
-      price: typeof d.price === 'number' ? d.price : null,
+      quantity,
+      unit,
+      price,
       category,
       checked: Boolean(d.checked),
-      note: typeof d.note === 'string' && d.note ? d.note : undefined,
-      emoji:
-        typeof d.emoji === 'string' && d.emoji
-          ? d.emoji
-          : detectItemEmoji(name, category),
-      recipeId: typeof d.recipeId === 'string' && d.recipeId ? d.recipeId : undefined,
-      recipeName: typeof d.recipeName === 'string' && d.recipeName ? d.recipeName : undefined,
-      addedBy: typeof d.addedBy === 'string' ? d.addedBy : undefined,
+      note: cleanNote,
+      emoji: cleanEmoji,
+      recipeId,
+      recipeName,
+      addedBy,
       createdAt: toMillis(d.createdAt),
     };
   }, []);
 
   const attachListSubListeners = useCallback(
     (listId: string) => {
+      if (!SAFE_ID_REGEX.test(listId)) return;
       if (!itemUnsubsRef.current[listId]) {
         const itemsPath = `lists/${listId}/items`;
         itemUnsubsRef.current[listId] = onSnapshot(
@@ -847,8 +974,11 @@ export function useShoppingStore() {
             const parsedMembers: ListMember[] = membersSnap.docs.map((mDoc) => {
               const d = mDoc.data({ serverTimestamps: 'estimate' });
               return {
-                uid: String(d.uid ?? mDoc.id),
-                displayName: String(d.displayName ?? 'Participante'),
+                uid:
+                  typeof d.uid === 'string' && SAFE_ID_REGEX.test(d.uid)
+                    ? d.uid
+                    : mDoc.id,
+                displayName: sanitizeText(d.displayName, 80) || 'Participante',
                 role: d.role === 'owner' ? 'owner' : 'editor',
                 joinedAt: toMillis(d.joinedAt),
               };
@@ -898,13 +1028,25 @@ export function useShoppingStore() {
         listsSnap.docs.forEach((docSnap) => {
           const data = docSnap.data({ serverTimestamps: 'estimate' });
           const listId = docSnap.id;
+          const cleanInvite =
+            typeof data.inviteCode === 'string' ? normalizeInviteCode(data.inviteCode) : '';
           nextLists[listId] = {
             id: listId,
-            name: String(data.name ?? 'Lista'),
-            budget: typeof data.budget === 'number' ? data.budget : null,
-            ownerId: String(data.ownerId ?? ''),
-            inviteCode: String(data.inviteCode ?? ''),
-            memberIds: Array.isArray(data.memberIds) ? data.memberIds : [],
+            name: sanitizeText(data.name, 80) || 'Lista',
+            budget:
+              typeof data.budget === 'number' && Number.isFinite(data.budget) && data.budget >= 0
+                ? Math.min(MAX_MONEY_AMOUNT, data.budget)
+                : null,
+            ownerId:
+              typeof data.ownerId === 'string' && SAFE_ID_REGEX.test(data.ownerId)
+                ? data.ownerId
+                : '',
+            inviteCode: isValidInviteCodeFormat(cleanInvite) ? cleanInvite : '',
+            memberIds: Array.isArray(data.memberIds)
+              ? data.memberIds
+                  .filter((id): id is string => typeof id === 'string' && SAFE_ID_REGEX.test(id))
+                  .slice(0, 10)
+              : [],
             updatedAt: toMillis(data.updatedAt),
             items: [],
             members: [],
@@ -927,8 +1069,11 @@ export function useShoppingStore() {
           const parsedMembers: ListMember[] = membersSnap.docs.map((mDoc) => {
             const d = mDoc.data({ serverTimestamps: 'estimate' });
             return {
-              uid: String(d.uid ?? mDoc.id),
-              displayName: String(d.displayName ?? 'Participante'),
+              uid:
+                typeof d.uid === 'string' && SAFE_ID_REGEX.test(d.uid)
+                  ? d.uid
+                  : mDoc.id,
+              displayName: sanitizeText(d.displayName, 80) || 'Participante',
               role: d.role === 'owner' ? 'owner' : 'editor',
               joinedAt: toMillis(d.joinedAt),
             };
@@ -952,28 +1097,12 @@ export function useShoppingStore() {
   // Subscribe to Firestore lists only when authenticated with verified email
   useEffect(() => {
     if (!authReady || !user) {
-      Object.values(itemUnsubsRef.current).forEach((u) => u());
-      Object.values(memberUnsubsRef.current).forEach((u) => u());
-      itemUnsubsRef.current = {};
-      memberUnsubsRef.current = {};
-      pendingWritesBySourceRef.current = {};
-      optimisticOpsRef.current = {};
-      setOptimisticOpsByList({});
-      setHasPendingCloudWrites(false);
+      resetCloudSessionState(false);
       return;
     }
 
     if (!user.emailVerified) {
-      Object.values(itemUnsubsRef.current).forEach((u) => u());
-      Object.values(memberUnsubsRef.current).forEach((u) => u());
-      itemUnsubsRef.current = {};
-      memberUnsubsRef.current = {};
-      pendingWritesBySourceRef.current = {};
-      setCloudListsMap({});
-      setCloudItemsMap({});
-      setCloudMembersMap({});
-      setCloudRecipes(null);
-      setHasPendingCloudWrites(false);
+      resetCloudSessionState(false);
       setAuthError('Sua conta Google precisa estar com o e-mail verificado para sincronizar.');
       return;
     }
@@ -1005,14 +1134,26 @@ export function useShoppingStore() {
           const data = docSnap.data({ serverTimestamps: 'estimate' });
           const listId = docSnap.id;
           activeIds.add(listId);
+          const cleanInvite =
+            typeof data.inviteCode === 'string' ? normalizeInviteCode(data.inviteCode) : '';
 
           nextLists[listId] = {
             id: listId,
-            name: String(data.name ?? 'Lista'),
-            budget: typeof data.budget === 'number' ? data.budget : null,
-            ownerId: String(data.ownerId ?? ''),
-            inviteCode: String(data.inviteCode ?? ''),
-            memberIds: Array.isArray(data.memberIds) ? data.memberIds : [],
+            name: sanitizeText(data.name, 80) || 'Lista',
+            budget:
+              typeof data.budget === 'number' && Number.isFinite(data.budget) && data.budget >= 0
+                ? Math.min(MAX_MONEY_AMOUNT, data.budget)
+                : null,
+            ownerId:
+              typeof data.ownerId === 'string' && SAFE_ID_REGEX.test(data.ownerId)
+                ? data.ownerId
+                : '',
+            inviteCode: isValidInviteCodeFormat(cleanInvite) ? cleanInvite : '',
+            memberIds: Array.isArray(data.memberIds)
+              ? data.memberIds
+                  .filter((id): id is string => typeof id === 'string' && SAFE_ID_REGEX.test(id))
+                  .slice(0, 10)
+              : [],
             updatedAt: toMillis(data.updatedAt),
             items: [],
             members: [],
@@ -1065,14 +1206,15 @@ export function useShoppingStore() {
             const d = rDoc.data({ serverTimestamps: 'estimate' });
             const rawIngredients = Array.isArray(d.ingredients) ? d.ingredients : [];
             const ingredients: RecipeIngredient[] = rawIngredients
+              .slice(0, 30)
               .map(sanitizeRecipeIngredient)
               .filter((x): x is RecipeIngredient => x !== null);
             if (ingredients.length === 0) return null;
             return {
               id: rDoc.id,
-              name: String(d.name ?? 'Receita'),
-              emoji: typeof d.emoji === 'string' && d.emoji ? d.emoji : '🍲',
-              notes: typeof d.notes === 'string' && d.notes ? d.notes : undefined,
+              name: sanitizeText(d.name, 80) || 'Receita',
+              emoji: sanitizeText(d.emoji, 16) || '🍲',
+              notes: sanitizeOptionalText(d.notes, 200),
               ingredients,
               updatedAt: toMillis(d.updatedAt),
             } as Recipe;
@@ -1118,6 +1260,7 @@ export function useShoppingStore() {
     attachListSubListeners,
     migrateLocalListsToCloud,
     migrateLocalRecipesToCloud,
+    resetCloudSessionState,
     syncNow,
     updatePendingWritesFlag,
   ]);
@@ -1209,17 +1352,14 @@ export function useShoppingStore() {
 
   const logout = useCallback(async () => {
     isLoggingOutRef.current = true;
-    Object.values(itemUnsubsRef.current).forEach((u) => u());
-    Object.values(memberUnsubsRef.current).forEach((u) => u());
-    itemUnsubsRef.current = {};
-    memberUnsubsRef.current = {};
+    resetCloudSessionState(true);
 
     try {
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (!key) continue;
-        if (key !== PRIMARY_THEME_KEY && key !== ACCENT_THEME_KEY) {
+        if (key !== PRIMARY_THEME_KEY && key !== ACCENT_THEME_KEY && key !== INVITE_GUARD_KEY) {
           keysToRemove.push(key);
         }
       }
@@ -1230,16 +1370,10 @@ export function useShoppingStore() {
 
     try {
       sessionStorage.removeItem(PENDING_INVITE_KEY);
-      sessionStorage.removeItem(INVITE_GUARD_KEY);
     } catch {
       // ignore
     }
 
-    setCloudListsMap({});
-    setCloudItemsMap({});
-    setCloudMembersMap({});
-    setCloudRecipes(null);
-    setAppliedRecipesMap({});
     setLocalLists(INITIAL_LISTS);
     setLocalRecipes(INITIAL_RECIPES);
     setActiveListId(INITIAL_LISTS[0].id);
@@ -1252,7 +1386,7 @@ export function useShoppingStore() {
       return;
     }
     isLoggingOutRef.current = false;
-  }, []);
+  }, [resetCloudSessionState]);
 
   const joinListByCode = useCallback(
     async (rawCode: string): Promise<{ listName: string; alreadyMember: boolean }> => {
@@ -1263,22 +1397,7 @@ export function useShoppingStore() {
         throw new Error('Sua conta Google precisa estar com o e-mail verificado.');
       }
 
-      let guard = { fails: 0, blockedUntil: 0 };
-      try {
-        const savedGuard = sessionStorage.getItem(INVITE_GUARD_KEY);
-        if (savedGuard) {
-          const parsed = safeJsonParse(savedGuard, 1024);
-          if (isPlainRecord(parsed)) {
-            guard = {
-              fails: typeof parsed.fails === 'number' ? parsed.fails : 0,
-              blockedUntil: typeof parsed.blockedUntil === 'number' ? parsed.blockedUntil : 0,
-            };
-          }
-        }
-      } catch {
-        guard = { fails: 0, blockedUntil: 0 };
-      }
-
+      const guard = readInviteGuard();
       const now = Date.now();
       if (guard.blockedUntil > now) {
         const remainingSecs = Math.max(1, Math.ceil((guard.blockedUntil - now) / 1000));
@@ -1287,7 +1406,7 @@ export function useShoppingStore() {
         );
       }
 
-      const code = normalizeInviteCode(rawCode);
+      const code = extractInviteCode(rawCode);
       if (!isValidInviteCodeFormat(code)) {
         throw new Error('O código de convite deve ter de 8 a 16 letras ou números.');
       }
@@ -1302,26 +1421,16 @@ export function useShoppingStore() {
 
       if (!inviteSnap.exists()) {
         const nextFails = guard.fails + 1;
-        const cooldownMs = nextFails >= 5 ? 30000 : nextFails >= 3 ? 15000 : 0;
-        try {
-          sessionStorage.setItem(
-            INVITE_GUARD_KEY,
-            JSON.stringify({
-              fails: nextFails,
-              blockedUntil: cooldownMs > 0 ? Date.now() + cooldownMs : 0,
-            })
-          );
-        } catch {
-          // ignore
-        }
+        const cooldownMs =
+          nextFails >= 7 ? 120000 : nextFails >= 5 ? 60000 : nextFails >= 3 ? 15000 : 0;
+        writeInviteGuard({
+          fails: nextFails,
+          blockedUntil: cooldownMs > 0 ? Date.now() + cooldownMs : 0,
+        });
         throw new Error('Código de convite não encontrado ou revogado. Peça um novo código.');
       }
 
-      try {
-        sessionStorage.removeItem(INVITE_GUARD_KEY);
-      } catch {
-        // ignore
-      }
+      clearInviteGuard();
 
       const inviteData = inviteSnap.data();
       const targetListId = typeof inviteData.listId === 'string' ? inviteData.listId.trim() : '';
@@ -1452,8 +1561,8 @@ export function useShoppingStore() {
       const trimmed = sanitizeText(name, 80);
       if (!trimmed) return;
       const safeBudget =
-        budget !== null && !Number.isNaN(budget) && budget >= 0
-          ? Math.min(1000000, budget)
+        budget !== null && Number.isFinite(budget) && budget >= 0
+          ? Math.min(MAX_MONEY_AMOUNT, budget)
           : null;
 
       if (!user) {
@@ -1504,7 +1613,7 @@ export function useShoppingStore() {
         setActiveListId(listId);
       } catch (err) {
         pendingTargetListIdRef.current = null;
-        handleFirestoreError(err, OperationType.CREATE, `lists/${listId}`);
+        setSyncError(reportFirestoreError(err, OperationType.CREATE, `lists/${listId}`));
       }
     },
     [user]
@@ -1513,16 +1622,22 @@ export function useShoppingStore() {
   const renameList = useCallback(
     async (listId: string, name: string, budget?: number | null) => {
       const trimmed = sanitizeText(name, 80);
-      if (!trimmed) return;
+      if (!trimmed || !SAFE_ID_REGEX.test(listId)) return;
 
       if (!user || !cloudListsMap[listId]) {
+        const safeLocalBudget =
+          budget !== undefined
+            ? budget !== null && Number.isFinite(budget) && budget >= 0
+              ? Math.min(MAX_MONEY_AMOUNT, budget)
+              : null
+            : undefined;
         setLocalLists((prev) =>
           prev.map((l) =>
             l.id === listId
               ? {
                   ...l,
                   name: trimmed,
-                  budget: budget !== undefined ? budget : l.budget,
+                  budget: safeLocalBudget !== undefined ? safeLocalBudget : l.budget,
                   updatedAt: Date.now(),
                 }
               : l
@@ -1534,8 +1649,8 @@ export function useShoppingStore() {
       const currentBudget = cloudListsMap[listId]?.budget ?? null;
       const nextBudget =
         budget !== undefined
-          ? budget !== null && budget >= 0
-            ? Math.min(1000000, budget)
+          ? budget !== null && Number.isFinite(budget) && budget >= 0
+            ? Math.min(MAX_MONEY_AMOUNT, budget)
             : null
           : currentBudget;
 
@@ -1546,7 +1661,7 @@ export function useShoppingStore() {
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `lists/${listId}`);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, `lists/${listId}`));
       }
     },
     [user, cloudListsMap]
@@ -1554,9 +1669,10 @@ export function useShoppingStore() {
 
   const updateListBudget = useCallback(
     async (listId: string, budget: number | null) => {
+      if (!SAFE_ID_REGEX.test(listId)) return;
       const safeBudget =
-        budget !== null && !Number.isNaN(budget) && budget >= 0
-          ? Math.min(1000000, budget)
+        budget !== null && Number.isFinite(budget) && budget >= 0
+          ? Math.min(MAX_MONEY_AMOUNT, budget)
           : null;
 
       if (!user || !cloudListsMap[listId]) {
@@ -1568,12 +1684,12 @@ export function useShoppingStore() {
 
       try {
         await updateDoc(doc(db, 'lists', listId), {
-          name: cloudListsMap[listId].name,
+          name: sanitizeText(cloudListsMap[listId].name, 80) || 'Lista',
           budget: safeBudget,
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `lists/${listId}`);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, `lists/${listId}`));
       }
     },
     [user, cloudListsMap]
@@ -1583,13 +1699,14 @@ export function useShoppingStore() {
     async (listId: string) => {
       const source = lists.find((l) => l.id === listId);
       if (!source) return;
+      const newName = sanitizeText(`${source.name} (Cópia)`, 80) || 'Lista (Cópia)';
 
       if (!user) {
         const newId = generateSafeId('lista');
         const cloned: ShoppingList = {
           ...source,
           id: newId,
-          name: `${source.name} (Cópia)`.slice(0, 80),
+          name: newName,
           updatedAt: Date.now(),
           items: source.items.map((item) => ({
             ...item,
@@ -1604,17 +1721,16 @@ export function useShoppingStore() {
 
       const newListId = generateSafeId('list');
       const inviteCode = generateInviteCode();
-      const newName = `${source.name} (Cópia)`.slice(0, 80);
-      const displayName = (
-        user.displayName ||
-        user.email?.split('@')[0] ||
-        'Você'
-      ).slice(0, 80);
+      const displayName =
+        sanitizeText(user.displayName || user.email?.split('@')[0], 80) || 'Você';
 
       const headerBatch = writeBatch(db);
       headerBatch.set(doc(db, 'lists', newListId), {
         name: newName,
-        budget: source.budget ?? null,
+        budget:
+          source.budget !== null && Number.isFinite(source.budget) && source.budget >= 0
+            ? Math.min(MAX_MONEY_AMOUNT, source.budget)
+            : null,
         ownerId: user.uid,
         inviteCode,
         memberIds: [user.uid],
@@ -1640,21 +1756,26 @@ export function useShoppingStore() {
           const itemBatch = writeBatch(db);
           for (const item of source.items.slice(i, i + MAX_BATCH_OPS)) {
             const itemId = generateSafeId('item');
-            const cleanName = item.name.trim().slice(0, 100) || 'Item';
+            const cleanName = sanitizeText(item.name, 100) || 'Item';
             const cleanCat = sanitizeCategory(item.category, cleanName);
             const cleanUnit = sanitizeUnit(item.unit);
+            const cleanNote = sanitizeOptionalText(item.note, 160) ?? null;
+            const cleanEmoji = sanitizeText(item.emoji, 16) || detectItemEmoji(cleanName, cleanCat);
             itemBatch.set(doc(db, 'lists', newListId, 'items', itemId), {
               name: cleanName,
-              quantity: Math.min(10000, Math.max(0.1, Number(item.quantity) || 1)),
+              quantity: Math.min(
+                MAX_ITEM_QUANTITY,
+                Math.max(MIN_ITEM_QUANTITY, Number(item.quantity) || 1)
+              ),
               unit: cleanUnit,
               price:
-                item.price !== null && item.price >= 0
-                  ? Math.min(1000000, Number(item.price))
+                item.price !== null && Number.isFinite(item.price) && item.price >= 0
+                  ? Math.min(MAX_MONEY_AMOUNT, Number(item.price))
                   : null,
               category: cleanCat,
               checked: false,
-              note: item.note ? item.note.slice(0, 160) : null,
-              emoji: (item.emoji || detectItemEmoji(cleanName, cleanCat)).slice(0, 16),
+              note: cleanNote,
+              emoji: cleanEmoji,
               addedBy: user.uid,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -1666,7 +1787,7 @@ export function useShoppingStore() {
         setActiveListId(newListId);
       } catch (err) {
         pendingTargetListIdRef.current = null;
-        handleFirestoreError(err, OperationType.CREATE, `lists/${newListId}`);
+        setSyncError(reportFirestoreError(err, OperationType.CREATE, `lists/${newListId}`));
       }
     },
     [lists, user]
@@ -1674,7 +1795,7 @@ export function useShoppingStore() {
 
   const deleteList = useCallback(
     async (listId: string) => {
-      if (lists.length <= 1) return;
+      if (lists.length <= 1 || !SAFE_ID_REGEX.test(listId)) return;
 
       if (!user || !cloudListsMap[listId]) {
         setLocalLists((prev) => {
@@ -1700,7 +1821,7 @@ export function useShoppingStore() {
         try {
           await batch.commit();
         } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, `lists/${listId}`);
+          setSyncError(reportFirestoreError(err, OperationType.UPDATE, `lists/${listId}`));
         }
         return;
       }
@@ -1717,13 +1838,13 @@ export function useShoppingStore() {
 
         const tailBatch = writeBatch(db);
         membersSnap.docs.forEach((d) => tailBatch.delete(d.ref));
-        if (target.inviteCode) {
+        if (target.inviteCode && isValidInviteCodeFormat(target.inviteCode)) {
           tailBatch.delete(doc(db, 'invites', target.inviteCode));
         }
         tailBatch.delete(doc(db, 'lists', listId));
         await tailBatch.commit();
       } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `lists/${listId}`);
+        setSyncError(reportFirestoreError(err, OperationType.DELETE, `lists/${listId}`));
       }
     },
     [lists.length, activeListId, user, cloudListsMap]
@@ -1731,7 +1852,14 @@ export function useShoppingStore() {
 
   const removeMember = useCallback(
     async (listId: string, memberUid: string) => {
-      if (!user || !cloudListsMap[listId]) return;
+      if (
+        !user ||
+        !cloudListsMap[listId] ||
+        !SAFE_ID_REGEX.test(listId) ||
+        !SAFE_ID_REGEX.test(memberUid)
+      ) {
+        return;
+      }
       const batch = writeBatch(db);
       batch.update(doc(db, 'lists', listId), {
         memberIds: arrayRemove(memberUid),
@@ -1741,7 +1869,7 @@ export function useShoppingStore() {
       try {
         await batch.commit();
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `lists/${listId}`);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, `lists/${listId}`));
       }
     },
     [user, cloudListsMap]
@@ -2106,24 +2234,26 @@ export function useShoppingStore() {
 
   const restoreItem = useCallback(
     async (item: ShoppingItem, targetListId: string) => {
-      const cleanName = item.name.trim().slice(0, 100);
+      if (!SAFE_ID_REGEX.test(targetListId)) return;
+      const cleanName = sanitizeText(item.name, 100);
       if (!cleanName) return;
-      const qty = Math.min(10000, Math.max(0.1, Number(item.quantity) || 1));
+      const qty = Math.min(
+        MAX_ITEM_QUANTITY,
+        Math.max(MIN_ITEM_QUANTITY, Number(item.quantity) || 1)
+      );
       const unit = sanitizeUnit(item.unit);
       const category = sanitizeCategory(item.category, cleanName);
       const price =
         item.price !== null && Number.isFinite(item.price) && item.price >= 0
-          ? Math.min(1000000, item.price)
+          ? Math.min(MAX_MONEY_AMOUNT, item.price)
           : null;
-      const note = item.note?.trim() ? item.note.trim().slice(0, 160) : null;
-      const emoji = (item.emoji?.trim() || detectItemEmoji(cleanName, category)).slice(0, 16);
+      const note = sanitizeOptionalText(item.note, 160) ?? null;
+      const emoji = sanitizeText(item.emoji, 16) || detectItemEmoji(cleanName, category);
       const safeRecipeId =
         typeof item.recipeId === 'string' && SAFE_ID_REGEX.test(item.recipeId.trim())
           ? item.recipeId.trim().slice(0, 128)
           : null;
-      const safeRecipeName = item.recipeName?.trim()
-        ? item.recipeName.trim().slice(0, 80)
-        : null;
+      const safeRecipeName = sanitizeOptionalText(item.recipeName, 80) ?? null;
 
       if (!user || !cloudListsMapRef.current[targetListId]) {
         setLocalLists((prev) =>
@@ -2200,7 +2330,7 @@ export function useShoppingStore() {
       const cleanName = sanitizeText(input.name, 80);
       if (!cleanName || input.ingredients.length === 0) return;
       const cleanEmoji = sanitizeText(input.emoji, 16) || '🍲';
-      const cleanNotes = sanitizeText(input.notes, 200) || undefined;
+      const cleanNotes = sanitizeOptionalText(input.notes, 200);
       const cleanIngredients: RecipeIngredient[] = input.ingredients
         .slice(0, 30)
         .map((ing) => {
@@ -2208,7 +2338,10 @@ export function useShoppingStore() {
           const cat = sanitizeCategory(ing.category, n);
           return {
             name: n,
-            quantity: Math.min(10000, Math.max(0.1, Number(ing.quantity) || 1)),
+            quantity: Math.min(
+              MAX_ITEM_QUANTITY,
+              Math.max(MIN_ITEM_QUANTITY, Number(ing.quantity) || 1)
+            ),
             unit: sanitizeUnit(ing.unit),
             category: cat,
             emoji: sanitizeText(ing.emoji, 16) || detectItemEmoji(n, cat),
@@ -2257,7 +2390,9 @@ export function useShoppingStore() {
           });
         }
       } catch (err) {
-        handleFirestoreError(err, isEdit ? OperationType.UPDATE : OperationType.CREATE, recipePath);
+        setSyncError(
+          reportFirestoreError(err, isEdit ? OperationType.UPDATE : OperationType.CREATE, recipePath)
+        );
       }
     },
     [user]
@@ -2265,6 +2400,7 @@ export function useShoppingStore() {
 
   const deleteRecipe = useCallback(
     async (recipeId: string) => {
+      if (!SAFE_ID_REGEX.test(recipeId)) return;
       if (!user) {
         setLocalRecipes((prev) => prev.filter((r) => r.id !== recipeId));
         return;
@@ -2273,7 +2409,7 @@ export function useShoppingStore() {
       try {
         await deleteDoc(doc(db, 'users', user.uid, 'recipes', recipeId));
       } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, recipePath);
+        setSyncError(reportFirestoreError(err, OperationType.DELETE, recipePath));
       }
     },
     [user]
@@ -2353,17 +2489,25 @@ export function useShoppingStore() {
             ops++;
           } else {
             const itemId = generateSafeId('item');
+            const cleanIngName = sanitizeText(ing.name, 100) || 'Ingrediente';
+            const cleanIngCat = sanitizeCategory(ing.category, cleanIngName);
+            const cleanIngEmoji =
+              sanitizeText(ing.emoji, 16) || detectItemEmoji(cleanIngName, cleanIngCat);
+            const safeRecipeName = sanitizeText(recipe.name, 80) || 'Receita';
             batch.set(doc(db, 'lists', listId, 'items', itemId), {
-              name: ing.name.trim().slice(0, 100),
-              quantity: Math.min(10000, Math.max(0.1, Number(ing.quantity) || 1)),
+              name: cleanIngName,
+              quantity: Math.min(
+                MAX_ITEM_QUANTITY,
+                Math.max(MIN_ITEM_QUANTITY, Number(ing.quantity) || 1)
+              ),
               unit: sanitizeUnit(ing.unit),
               price: null,
-              category: sanitizeCategory(ing.category, ing.name),
+              category: cleanIngCat,
               checked: false,
               note: null,
-              emoji: (ing.emoji || detectItemEmoji(ing.name, ing.category)).slice(0, 16),
-              recipeId: recipe.id,
-              recipeName: recipe.name.trim().slice(0, 80),
+              emoji: cleanIngEmoji,
+              recipeId: sanitizeId(recipe.id, 'receita'),
+              recipeName: safeRecipeName,
               addedBy: user.uid,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -2376,7 +2520,8 @@ export function useShoppingStore() {
           try {
             await batch.commit();
           } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`);
+            setSyncError(reportFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`));
+            return;
           }
         }
       }
@@ -2483,7 +2628,8 @@ export function useShoppingStore() {
           try {
             await batch.commit();
           } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`);
+            setSyncError(reportFirestoreError(err, OperationType.WRITE, `lists/${listId}/items`));
+            return;
           }
         }
       }
@@ -2522,7 +2668,7 @@ export function useShoppingStore() {
         await batch.commit();
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `lists/${listId}/items`);
+      setSyncError(reportFirestoreError(err, OperationType.DELETE, `lists/${listId}/items`));
     }
   }, [activeList, user, cloudListsMap]);
 
@@ -2558,7 +2704,7 @@ export function useShoppingStore() {
         await batch.commit();
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `lists/${listId}/items`);
+      setSyncError(reportFirestoreError(err, OperationType.UPDATE, `lists/${listId}/items`));
     }
   }, [activeList, user, cloudListsMap]);
 
@@ -2611,32 +2757,71 @@ export function useShoppingStore() {
   }, [activeList]);
 
   const exportBackupJson = useCallback((): string => {
-    return JSON.stringify({ version: 1, exportedAt: Date.now(), lists }, null, 2);
+    const safeLists = lists.slice(0, 30).map((list) => ({
+      id: sanitizeId(list.id, 'lista'),
+      name: sanitizeText(list.name, 80) || 'Lista',
+      budget:
+        list.budget !== null && Number.isFinite(list.budget) && list.budget >= 0
+          ? Math.min(MAX_MONEY_AMOUNT, list.budget)
+          : null,
+      updatedAt: list.updatedAt,
+      items: list.items.slice(0, 500).map((item) => {
+        const cleanName = sanitizeText(item.name, 100) || 'Item';
+        const cleanCat = sanitizeCategory(item.category, cleanName);
+        const cleanNote = sanitizeOptionalText(item.note, 160);
+        const cleanEmoji = sanitizeOptionalText(item.emoji, 16);
+        return {
+          id: sanitizeId(item.id, 'item'),
+          name: cleanName,
+          quantity: Math.min(
+            MAX_ITEM_QUANTITY,
+            Math.max(MIN_ITEM_QUANTITY, Number(item.quantity) || 1)
+          ),
+          unit: sanitizeUnit(item.unit),
+          price:
+            item.price !== null && Number.isFinite(item.price) && item.price >= 0
+              ? Math.min(MAX_MONEY_AMOUNT, item.price)
+              : null,
+          category: cleanCat,
+          checked: Boolean(item.checked),
+          ...(cleanNote ? { note: cleanNote } : {}),
+          ...(cleanEmoji ? { emoji: cleanEmoji } : {}),
+          createdAt: item.createdAt,
+        };
+      }),
+    }));
+    return JSON.stringify({ version: 1, exportedAt: Date.now(), lists: safeLists }, null, 2);
   }, [lists]);
 
-  const importBackupJson = useCallback((jsonText: string): boolean => {
-    try {
-      const parsed: unknown = safeJsonParse(jsonText, MAX_BACKUP_FILE_BYTES);
-      const rawLists = Array.isArray(parsed)
-        ? parsed
-        : isPlainRecord(parsed)
-          ? parsed.lists
-          : null;
-      if (!Array.isArray(rawLists) || rawLists.length === 0) return false;
+  const importBackupJson = useCallback(
+    (jsonText: string): boolean => {
+      if (user) {
+        return false;
+      }
+      try {
+        const parsed: unknown = safeJsonParse(jsonText, MAX_BACKUP_FILE_BYTES);
+        const rawLists = Array.isArray(parsed)
+          ? parsed
+          : isPlainRecord(parsed)
+            ? parsed.lists
+            : null;
+        if (!Array.isArray(rawLists) || rawLists.length === 0) return false;
 
-      const sanitized = rawLists
-        .slice(0, 30)
-        .map(sanitizeShoppingList)
-        .filter((l): l is ShoppingList => l !== null);
+        const sanitized = rawLists
+          .slice(0, 30)
+          .map(sanitizeShoppingList)
+          .filter((l): l is ShoppingList => l !== null);
 
-      if (sanitized.length === 0) return false;
-      setLocalLists(sanitized);
-      setActiveListId(sanitized[0].id);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+        if (sanitized.length === 0) return false;
+        setLocalLists(sanitized);
+        setActiveListId(sanitized[0].id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [user]
+  );
 
   const resetDemoData = useCallback(() => {
     setLocalLists(INITIAL_LISTS);

@@ -3,6 +3,7 @@ import { Check, Copy, Pencil, Plus, Trash2, Users } from 'lucide-react';
 import { motion } from 'motion/react';
 import { formatBRL } from '../data/catalog';
 import { ShoppingList } from '../types/shopping';
+import { parseBoundedBudget, sanitizeText } from '../utils/security';
 
 interface ListsManagerViewProps {
   lists: ShoppingList[];
@@ -10,10 +11,10 @@ interface ListsManagerViewProps {
   isSignedIn: boolean;
   onOpenSync: () => void;
   onSelectList: (id: string) => void;
-  onCreateList: (name: string, budget: number | null) => void;
-  onRenameList: (id: string, name: string, budget?: number | null) => void;
-  onDuplicateList: (id: string) => void;
-  onDeleteList: (id: string) => void;
+  onCreateList: (name: string, budget: number | null) => Promise<void> | void;
+  onRenameList: (id: string, name: string, budget?: number | null) => Promise<void> | void;
+  onDuplicateList: (id: string) => Promise<void> | void;
+  onDeleteList: (id: string) => Promise<void> | void;
 }
 
 export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
@@ -34,30 +35,34 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
   const [editName, setEditName] = useState('');
   const [editBudget, setEditBudget] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [busyActionKey, setBusyActionKey] = useState<string | null>(null);
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim()) return;
-    const parsedBudget = newBudget.trim() ? Number(newBudget.replace(',', '.')) : null;
-    onCreateList(
-      newName.trim(),
-      parsedBudget !== null && !Number.isNaN(parsedBudget) && parsedBudget > 0 ? parsedBudget : null
-    );
-    setNewName('');
-    setNewBudget('');
-    setShowCreateForm(false);
+    const cleanName = sanitizeText(newName, 80);
+    if (!cleanName || busyActionKey === 'create') return;
+    setBusyActionKey('create');
+    try {
+      await onCreateList(cleanName, parseBoundedBudget(newBudget));
+      setNewName('');
+      setNewBudget('');
+      setShowCreateForm(false);
+    } finally {
+      setBusyActionKey(null);
+    }
   };
 
-  const handleSaveRename = (e: React.FormEvent, id: string) => {
+  const handleSaveRename = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
-    if (!editName.trim()) return;
-    const parsedBudget = editBudget.trim() ? Number(editBudget.replace(',', '.')) : null;
-    onRenameList(
-      id,
-      editName.trim(),
-      parsedBudget !== null && !Number.isNaN(parsedBudget) && parsedBudget > 0 ? parsedBudget : null
-    );
-    setEditingId(null);
+    const cleanName = sanitizeText(editName, 80);
+    if (!cleanName || busyActionKey === `rename:${id}`) return;
+    setBusyActionKey(`rename:${id}`);
+    try {
+      await onRenameList(id, cleanName, parseBoundedBudget(editBudget));
+      setEditingId(null);
+    } finally {
+      setBusyActionKey(null);
+    }
   };
 
   return (
@@ -117,6 +122,7 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
             <input
               type="text"
               inputMode="decimal"
+              maxLength={12}
               value={newBudget}
               onChange={(e) => setNewBudget(e.target.value)}
               placeholder="Meta R$ (opcional)"
@@ -126,9 +132,10 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="submit"
-              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-accent px-5 py-2 text-xs font-semibold text-accent-fg hover:bg-accent-hover transition-colors"
+              disabled={busyActionKey === 'create'}
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-accent px-5 py-2 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
-              Criar lista
+              {busyActionKey === 'create' ? 'Criando...' : 'Criar lista'}
             </button>
             <button
               type="button"
@@ -174,6 +181,7 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                   <input
                     type="text"
                     inputMode="decimal"
+                    maxLength={12}
                     value={editBudget}
                     onChange={(e) => setEditBudget(e.target.value)}
                     placeholder="Meta R$ (opcional)"
@@ -183,9 +191,10 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                 <div className="flex items-center gap-2">
                   <button
                     type="submit"
-                    className="min-h-[44px] rounded-xl bg-accent px-4 text-xs font-semibold text-accent-fg hover:bg-accent-hover"
+                    disabled={busyActionKey === `rename:${list.id}`}
+                    className="min-h-[44px] rounded-xl bg-accent px-4 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-50"
                   >
-                    Salvar
+                    {busyActionKey === `rename:${list.id}` ? 'Salvando...' : 'Salvar'}
                   </button>
                   <button
                     type="button"
@@ -279,9 +288,16 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onDuplicateList(list.id)}
+                  disabled={busyActionKey === `dup:${list.id}`}
+                  onClick={() => {
+                    if (busyActionKey) return;
+                    setBusyActionKey(`dup:${list.id}`);
+                    void Promise.resolve(onDuplicateList(list.id)).finally(() =>
+                      setBusyActionKey(null)
+                    );
+                  }}
                   aria-label={`Duplicar ${list.name}`}
-                  className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-ink-muted hover:bg-surface-muted hover:text-ink"
+                  className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-ink-muted hover:bg-surface-muted hover:text-ink disabled:opacity-50"
                 >
                   <Copy className="h-4 w-4" aria-hidden="true" />
                 </button>
@@ -290,13 +306,18 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
+                        disabled={busyActionKey === `del:${list.id}`}
                         onClick={() => {
-                          onDeleteList(list.id);
-                          setConfirmDeleteId(null);
+                          if (busyActionKey) return;
+                          setBusyActionKey(`del:${list.id}`);
+                          void Promise.resolve(onDeleteList(list.id)).finally(() => {
+                            setBusyActionKey(null);
+                            setConfirmDeleteId(null);
+                          });
                         }}
-                        className="min-h-[44px] rounded-xl bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-700 transition-colors whitespace-nowrap"
+                        className="min-h-[44px] rounded-xl bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50 transition-colors whitespace-nowrap"
                       >
-                        Excluir
+                        {busyActionKey === `del:${list.id}` ? 'Excluindo...' : 'Excluir'}
                       </button>
                       <button
                         type="button"

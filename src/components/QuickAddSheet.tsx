@@ -12,6 +12,12 @@ import {
 } from '../data/catalog';
 import { AddItemInput } from '../hooks/useShoppingStore';
 import { CategoryId, UnitType } from '../types/shopping';
+import {
+  MAX_ITEM_QUANTITY,
+  parseBoundedPrice,
+  parseBoundedQuantity,
+  sanitizeText,
+} from '../utils/security';
 
 interface QuickAddSheetProps {
   open: boolean;
@@ -97,20 +103,21 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({ open, onClose, onA
   };
 
   const commitItem = (keepOpen: boolean) => {
-    const trimmed = name.trim();
+    const trimmed = sanitizeText(name, 100);
     if (!trimmed) {
       nameInputRef.current?.focus();
       return;
     }
-    const parsedPrice = priceText.trim() ? Number(priceText.replace(',', '.')) : null;
+    const parsedPrice = parseBoundedPrice(priceText);
+    const boundedQty = parseBoundedQuantity(quantity, 1);
 
     onAdd({
       name: trimmed,
-      quantity,
+      quantity: boundedQty,
       unit,
-      price: parsedPrice !== null && !Number.isNaN(parsedPrice) ? parsedPrice : null,
+      price: parsedPrice,
       category,
-      note,
+      note: sanitizeText(note, 160),
       emoji,
     });
 
@@ -331,15 +338,19 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({ open, onClose, onA
                           type="number"
                           step="any"
                           min="0.1"
+                          max={MAX_ITEM_QUANTITY}
                           value={quantity}
-                          onChange={(e) => setQuantity(Math.max(0.1, Number(e.target.value) || 1))}
+                          onChange={(e) => setQuantity(parseBoundedQuantity(e.target.value, 1))}
                           className="w-full bg-transparent text-center font-mono-tabular text-sm font-semibold text-ink focus:outline-none"
                         />
                         <button
                           type="button"
                           onClick={() =>
                             setQuantity((q) =>
-                              Number((q + (unit === 'kg' || unit === 'L' ? 0.5 : 1)).toFixed(2))
+                              Math.min(
+                                MAX_ITEM_QUANTITY,
+                                Number((q + (unit === 'kg' || unit === 'L' ? 0.5 : 1)).toFixed(2))
+                              )
                             )
                           }
                           aria-label="Aumentar quantidade"
@@ -361,6 +372,7 @@ export const QuickAddSheet: React.FC<QuickAddSheetProps> = ({ open, onClose, onA
                         id="item-price-input"
                         type="text"
                         inputMode="decimal"
+                        maxLength={12}
                         value={priceText}
                         onChange={(e) => setPriceText(e.target.value)}
                         placeholder="Ex: 12,90"

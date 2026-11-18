@@ -235,7 +235,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             Backup local
           </h2>
           <p className="mt-1 text-xs sm:text-sm text-ink-muted">
-            Exporte ou importe suas listas em arquivo JSON.
+            {user
+              ? 'Exporte uma cópia limpa das suas listas (sem códigos ou dados de participantes). Para importar JSON local, desconecte sua conta antes.'
+              : 'Exporte ou importe suas listas em arquivo JSON.'}
           </p>
         </div>
 
@@ -251,8 +253,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           <button
             type="button"
+            disabled={Boolean(user)}
+            title={
+              user
+                ? 'Desconecte sua conta Google antes de importar um backup local.'
+                : 'Importar backup JSON'
+            }
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-line px-4 py-2 text-xs sm:text-sm font-medium text-ink hover:bg-surface-muted"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-line px-4 py-2 text-xs sm:text-sm font-medium text-ink hover:bg-surface-muted disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Upload className="h-4 w-4" aria-hidden="true" />
             <span>Importar JSON</span>
@@ -261,6 +269,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             ref={fileInputRef}
             type="file"
             accept="application/json"
+            disabled={Boolean(user)}
             onChange={handleFileChange}
             className="hidden"
           />

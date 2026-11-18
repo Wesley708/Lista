@@ -3,6 +3,12 @@ import { ChevronDown, Minus, Plus, Trash2, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { CATEGORIES, EMOJI_PRESETS, UNITS, detectItemEmoji } from '../data/catalog';
 import { CategoryId, ShoppingItem, UnitType } from '../types/shopping';
+import {
+  MAX_ITEM_QUANTITY,
+  parseBoundedPrice,
+  parseBoundedQuantity,
+  sanitizeText,
+} from '../utils/security';
 
 interface ItemEditSheetProps {
   item: ShoppingItem | null;
@@ -58,16 +64,18 @@ export const ItemEditSheet: React.FC<ItemEditSheetProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!item || !name.trim()) return;
-    const parsedPrice = priceText.trim() ? Number(priceText.replace(',', '.')) : null;
+    const cleanName = sanitizeText(name, 100);
+    if (!item || !cleanName) return;
+    const parsedPrice = parseBoundedPrice(priceText);
+    const boundedQty = parseBoundedQuantity(quantity, 1);
     onSave(item.id, {
-      name: name.trim(),
-      quantity: Math.max(0.1, Number(quantity) || 1),
+      name: cleanName,
+      quantity: boundedQty,
       unit,
-      price: parsedPrice !== null && !Number.isNaN(parsedPrice) ? Math.max(0, parsedPrice) : null,
+      price: parsedPrice,
       category,
       emoji,
-      note: note.trim() || undefined,
+      note: sanitizeText(note, 160) || undefined,
     });
     onClose();
   };
@@ -238,15 +246,19 @@ export const ItemEditSheet: React.FC<ItemEditSheetProps> = ({
                         type="number"
                         step="any"
                         min="0.1"
+                        max={MAX_ITEM_QUANTITY}
                         value={quantity}
-                        onChange={(e) => setQuantity(Math.max(0.1, Number(e.target.value) || 1))}
+                        onChange={(e) => setQuantity(parseBoundedQuantity(e.target.value, 1))}
                         className="w-full bg-transparent text-center font-mono-tabular text-sm font-semibold text-ink focus:outline-none"
                       />
                       <button
                         type="button"
                         onClick={() =>
                           setQuantity((q) =>
-                            Number((q + (unit === 'kg' || unit === 'L' ? 0.5 : 1)).toFixed(2))
+                            Math.min(
+                              MAX_ITEM_QUANTITY,
+                              Number((q + (unit === 'kg' || unit === 'L' ? 0.5 : 1)).toFixed(2))
+                            )
                           )
                         }
                         aria-label="Aumentar quantidade"
@@ -269,6 +281,7 @@ export const ItemEditSheet: React.FC<ItemEditSheetProps> = ({
                       id="edit-price"
                       type="text"
                       inputMode="decimal"
+                      maxLength={12}
                       value={priceText}
                       onChange={(e) => setPriceText(e.target.value)}
                       placeholder="Ex: 12,90"
