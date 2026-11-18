@@ -7,8 +7,10 @@ import {
   collection,
   deleteDoc,
   doc,
+  enableNetwork,
   getDoc,
   getDocs,
+  getDocsFromServer,
   onSnapshot,
   query,
   serverTimestamp,
@@ -41,6 +43,7 @@ import {
   auth,
   db,
   handleFirestoreError,
+  reportFirestoreError,
   signInWithGoogle,
   signOutUser,
 } from '../firebase';
@@ -280,8 +283,47 @@ function sanitizeShoppingList(raw: unknown): ShoppingList | null {
 
 function toMillis(val: unknown): number {
   if (val instanceof Timestamp) return val.toMillis();
-  if (typeof val === 'number') return val;
-  return Date.now();
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  return 0;
+}
+
+interface OptimisticItemOp {
+  seq: number;
+  settled: boolean;
+  deleted?: boolean;
+  patch?: Partial<ShoppingItem>;
+  createdItem?: ShoppingItem;
+}
+
+function mergeListItems(
+  cloudItems: ShoppingItem[],
+  ops: Record<string, OptimisticItemOp> | undefined
+): ShoppingItem[] {
+  if (!ops) return cloudItems;
+  const opEntries = Object.entries(ops);
+  if (opEntries.length === 0) return cloudItems;
+
+  const result: ShoppingItem[] = [];
+  const seenIds = new Set<string>();
+
+  for (const item of cloudItems) {
+    seenIds.add(item.id);
+    const op = ops[item.id];
+    if (!op) {
+      result.push(item);
+      continue;
+    }
+    if (op.deleted) continue;
+    result.push(op.patch ? { ...item, ...op.patch } : item);
+  }
+
+  for (const [itemId, op] of opEntries) {
+    if (seenIds.has(itemId) || op.deleted || !op.createdItem) continue;
+    const base = op.createdItem;
+    result.unshift(op.patch ? { ...base, ...op.patch } : base);
+  }
+
+  return result;
 }
 
 function loadLocalLists(): ShoppingList[] {
@@ -337,6 +379,12 @@ export function useShoppingStore() {
   const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [hasPendingCloudWrites, setHasPendingCloudWrites] = useState(false);
+  const [isRefreshingSync, setIsRefreshingSync] = useState(false);
+  const [optimisticOpsByList, setOptimisticOpsByList] = useState<
+    Record<string, Record<string, OptimisticItemOp>>
+  >({});
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(() => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -397,11 +445,30 @@ export function useShoppingStore() {
 
   const itemUnsubsRef = useRef<Record<string, Unsubscribe>>({});
   const memberUnsubsRef = useRef<Record<string, Unsubscribe>>({});
+  const pendingWritesBySourceRef = useRef<Record<string, boolean>>({});
+  const cloudListsMapRef = useRef<Record<string, ShoppingList>>({});
+  const cloudItemsMapRef = useRef<Record<string, ShoppingItem[]>>({});
+  const optimisticOpsRef = useRef<Record<string, Record<string, OptimisticItemOp>>>({});
+  const opSeqRef = useRef(0);
+  const activeListIdRef = useRef(activeListId);
+  const pendingTargetListIdRef = useRef<string | null>(null);
+  const pendingInviteCodeRef = useRef<string | null>(pendingInviteCode);
+  const joiningInviteRef = useRef(false);
+  const lastSyncAttemptRef = useRef(0);
+  const localListsRef = useRef(localLists);
+  const localRecipesRef = useRef(localRecipes);
   const migratingRef = useRef(false);
   const loginInFlightRef = useRef(false);
   const migratingRecipesRef = useRef(false);
   const isLoggingOutRef = useRef(false);
   const prevUidRef = useRef<string | null>(null);
+
+  activeListIdRef.current = activeListId;
+  cloudListsMapRef.current = cloudListsMap;
+  cloudItemsMapRef.current = cloudItemsMap;
+  pendingInviteCodeRef.current = pendingInviteCode;
+  localListsRef.current = localLists;
+  localRecipesRef.current = localRecipes;
 
   // Persist local lists, recipes & applied recipes (disabled during logout cleanup)
   useEffect(() => {
@@ -604,6 +671,284 @@ export function useShoppingStore() {
     []
   );
 
+  const updatePendingWritesFlag = useCallback((sourceKey: string, pending: boolean) => {
+    if (pending) {
+      pendingWritesBySourceRef.current[sourceKey] = true;
+    } else {
+      delete pendingWritesBySourceRef.current[sourceKey];
+    }
+    const anyPending = Object.keys(pendingWritesBySourceRef.current).length > 0;
+    setHasPendingCloudWrites(anyPending);
+  }, []);
+
+  const applyOptimisticOp = useCallback(
+    (listId: string, itemId: string, op: Omit<OptimisticItemOp, 'seq' | 'settled'>): number => {
+      const seq = ++opSeqRef.current;
+      const nextOp: OptimisticItemOp = { ...op, seq, settled: false };
+      const prevForList = optimisticOpsRef.current[listId] ?? {};
+      const nextForList = { ...prevForList, [itemId]: nextOp };
+      optimisticOpsRef.current = { ...optimisticOpsRef.current, [listId]: nextForList };
+      setOptimisticOpsByList(optimisticOpsRef.current);
+      return seq;
+    },
+    []
+  );
+
+  const doesCloudMatchOp = useCallback(
+    (items: ShoppingItem[], itemId: string, op: OptimisticItemOp): boolean => {
+      const found = items.find((i) => i.id === itemId);
+      if (op.deleted) return !found;
+      if (op.createdItem && !found) return false;
+      if (!found) return false;
+      if (!op.patch) return true;
+      for (const [key, val] of Object.entries(op.patch)) {
+        if ((found as unknown as Record<string, unknown>)[key] !== val) {
+          return false;
+        }
+      }
+      return true;
+    },
+    []
+  );
+
+  const settleOptimisticOp = useCallback(
+    (listId: string, itemId: string, seq: number) => {
+      const prevForList = optimisticOpsRef.current[listId];
+      const currentOp = prevForList?.[itemId];
+      if (!currentOp || currentOp.seq !== seq) return;
+
+      const cloudItems = cloudItemsMapRef.current[listId] ?? [];
+      if (doesCloudMatchOp(cloudItems, itemId, currentOp)) {
+        const nextForList = { ...prevForList };
+        delete nextForList[itemId];
+        const nextAll = { ...optimisticOpsRef.current };
+        if (Object.keys(nextForList).length === 0) {
+          delete nextAll[listId];
+        } else {
+          nextAll[listId] = nextForList;
+        }
+        optimisticOpsRef.current = nextAll;
+        setOptimisticOpsByList(nextAll);
+      } else {
+        const nextForList = { ...prevForList, [itemId]: { ...currentOp, settled: true } };
+        const nextAll = { ...optimisticOpsRef.current, [listId]: nextForList };
+        optimisticOpsRef.current = nextAll;
+        setOptimisticOpsByList(nextAll);
+      }
+    },
+    [doesCloudMatchOp]
+  );
+
+  const rollbackOptimisticOp = useCallback((listId: string, itemId: string, seq: number) => {
+    const prevForList = optimisticOpsRef.current[listId];
+    const currentOp = prevForList?.[itemId];
+    if (!currentOp || currentOp.seq !== seq) return;
+
+    const nextForList = { ...prevForList };
+    delete nextForList[itemId];
+    const nextAll = { ...optimisticOpsRef.current };
+    if (Object.keys(nextForList).length === 0) {
+      delete nextAll[listId];
+    } else {
+      nextAll[listId] = nextForList;
+    }
+    optimisticOpsRef.current = nextAll;
+    setOptimisticOpsByList(nextAll);
+  }, []);
+
+  const reconcileSettledOpsWithCloud = useCallback(
+    (listId: string, cloudItems: ShoppingItem[], hasPendingWrites: boolean, fromCache: boolean) => {
+      const prevForList = optimisticOpsRef.current[listId];
+      if (!prevForList) return;
+      let changed = false;
+      const nextForList = { ...prevForList };
+      for (const [itemId, op] of Object.entries(prevForList)) {
+        if (!op.settled) continue;
+        if (doesCloudMatchOp(cloudItems, itemId, op) || (!hasPendingWrites && !fromCache)) {
+          delete nextForList[itemId];
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      const nextAll = { ...optimisticOpsRef.current };
+      if (Object.keys(nextForList).length === 0) {
+        delete nextAll[listId];
+      } else {
+        nextAll[listId] = nextForList;
+      }
+      optimisticOpsRef.current = nextAll;
+      setOptimisticOpsByList(nextAll);
+    },
+    [doesCloudMatchOp]
+  );
+
+  const parseCloudItemDoc = useCallback((itemDoc: { id: string; data: (opts?: { serverTimestamps?: 'estimate' | 'previous' | 'none' }) => Record<string, unknown> }): ShoppingItem => {
+    const d = itemDoc.data({ serverTimestamps: 'estimate' });
+    const name = String(d.name ?? '');
+    const category = (d.category as CategoryId) ?? 'outros';
+    return {
+      id: itemDoc.id,
+      name,
+      quantity: Number(d.quantity ?? 1),
+      unit: (d.unit as UnitType) ?? 'un',
+      price: typeof d.price === 'number' ? d.price : null,
+      category,
+      checked: Boolean(d.checked),
+      note: typeof d.note === 'string' && d.note ? d.note : undefined,
+      emoji:
+        typeof d.emoji === 'string' && d.emoji
+          ? d.emoji
+          : detectItemEmoji(name, category),
+      recipeId: typeof d.recipeId === 'string' && d.recipeId ? d.recipeId : undefined,
+      recipeName: typeof d.recipeName === 'string' && d.recipeName ? d.recipeName : undefined,
+      addedBy: typeof d.addedBy === 'string' ? d.addedBy : undefined,
+      createdAt: toMillis(d.createdAt),
+    };
+  }, []);
+
+  const attachListSubListeners = useCallback(
+    (listId: string) => {
+      if (!itemUnsubsRef.current[listId]) {
+        const itemsPath = `lists/${listId}/items`;
+        itemUnsubsRef.current[listId] = onSnapshot(
+          collection(db, 'lists', listId, 'items'),
+          { includeMetadataChanges: true },
+          (itemsSnap) => {
+            const parsedItems: ShoppingItem[] = itemsSnap.docs.map((itemDoc) =>
+              parseCloudItemDoc(itemDoc)
+            );
+            cloudItemsMapRef.current = { ...cloudItemsMapRef.current, [listId]: parsedItems };
+            setCloudItemsMap((prev) => ({ ...prev, [listId]: parsedItems }));
+            updatePendingWritesFlag(`items:${listId}`, itemsSnap.metadata.hasPendingWrites);
+            reconcileSettledOpsWithCloud(
+              listId,
+              parsedItems,
+              itemsSnap.metadata.hasPendingWrites,
+              itemsSnap.metadata.fromCache
+            );
+            if (!itemsSnap.metadata.fromCache) {
+              setSyncError(null);
+            }
+          },
+          (err) => {
+            delete itemUnsubsRef.current[listId];
+            updatePendingWritesFlag(`items:${listId}`, false);
+            const msg = reportFirestoreError(err, OperationType.LIST, itemsPath);
+            setSyncError(msg);
+          }
+        );
+      }
+
+      if (!memberUnsubsRef.current[listId]) {
+        const membersPath = `lists/${listId}/members`;
+        memberUnsubsRef.current[listId] = onSnapshot(
+          collection(db, 'lists', listId, 'members'),
+          (membersSnap) => {
+            const parsedMembers: ListMember[] = membersSnap.docs.map((mDoc) => {
+              const d = mDoc.data({ serverTimestamps: 'estimate' });
+              return {
+                uid: String(d.uid ?? mDoc.id),
+                displayName: String(d.displayName ?? 'Participante'),
+                role: d.role === 'owner' ? 'owner' : 'editor',
+                joinedAt: toMillis(d.joinedAt),
+              };
+            });
+            setCloudMembersMap((prev) => ({ ...prev, [listId]: parsedMembers }));
+          },
+          (err) => {
+            delete memberUnsubsRef.current[listId];
+            const msg = reportFirestoreError(err, OperationType.LIST, membersPath);
+            setSyncError(msg);
+          }
+        );
+      }
+    },
+    [parseCloudItemDoc, reconcileSettledOpsWithCloud, updatePendingWritesFlag]
+  );
+
+  const syncNow = useCallback(
+    async (silent = false, explicitListId?: string) => {
+      if (!user || !user.emailVerified) return;
+      const now = Date.now();
+      if (silent && now - lastSyncAttemptRef.current < 1500) {
+        return;
+      }
+      lastSyncAttemptRef.current = now;
+      setIsRefreshingSync(true);
+
+      try {
+        await enableNetwork(db);
+        const listsQuery = query(
+          collection(db, 'lists'),
+          where('memberIds', 'array-contains', user.uid)
+        );
+        const targetId = explicitListId || pendingTargetListIdRef.current || activeListIdRef.current;
+
+        const [listsSnap, itemsSnap, membersSnap] = await Promise.all([
+          getDocsFromServer(listsQuery),
+          targetId && SAFE_ID_REGEX.test(targetId)
+            ? getDocsFromServer(collection(db, 'lists', targetId, 'items')).catch(() => null)
+            : Promise.resolve(null),
+          targetId && SAFE_ID_REGEX.test(targetId)
+            ? getDocsFromServer(collection(db, 'lists', targetId, 'members')).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
+        const nextLists: Record<string, ShoppingList> = {};
+        listsSnap.docs.forEach((docSnap) => {
+          const data = docSnap.data({ serverTimestamps: 'estimate' });
+          const listId = docSnap.id;
+          nextLists[listId] = {
+            id: listId,
+            name: String(data.name ?? 'Lista'),
+            budget: typeof data.budget === 'number' ? data.budget : null,
+            ownerId: String(data.ownerId ?? ''),
+            inviteCode: String(data.inviteCode ?? ''),
+            memberIds: Array.isArray(data.memberIds) ? data.memberIds : [],
+            updatedAt: toMillis(data.updatedAt),
+            items: [],
+            members: [],
+            isSynced: true,
+          };
+          attachListSubListeners(listId);
+        });
+
+        cloudListsMapRef.current = nextLists;
+        setCloudListsMap(nextLists);
+
+        if (targetId && itemsSnap) {
+          const parsedItems = itemsSnap.docs.map((itemDoc) => parseCloudItemDoc(itemDoc));
+          cloudItemsMapRef.current = { ...cloudItemsMapRef.current, [targetId]: parsedItems };
+          setCloudItemsMap((prev) => ({ ...prev, [targetId]: parsedItems }));
+          reconcileSettledOpsWithCloud(targetId, parsedItems, false, false);
+        }
+
+        if (targetId && membersSnap) {
+          const parsedMembers: ListMember[] = membersSnap.docs.map((mDoc) => {
+            const d = mDoc.data({ serverTimestamps: 'estimate' });
+            return {
+              uid: String(d.uid ?? mDoc.id),
+              displayName: String(d.displayName ?? 'Participante'),
+              role: d.role === 'owner' ? 'owner' : 'editor',
+              joinedAt: toMillis(d.joinedAt),
+            };
+          });
+          setCloudMembersMap((prev) => ({ ...prev, [targetId]: parsedMembers }));
+        }
+
+        setSyncError(null);
+      } catch (err) {
+        const msg = reportFirestoreError(err, OperationType.LIST, 'lists');
+        if (!silent) {
+          setSyncError(msg);
+        }
+      } finally {
+        setIsRefreshingSync(false);
+      }
+    },
+    [user, attachListSubListeners, parseCloudItemDoc, reconcileSettledOpsWithCloud]
+  );
+
   // Subscribe to Firestore lists only when authenticated with verified email
   useEffect(() => {
     if (!authReady || !user) {
@@ -611,6 +956,10 @@ export function useShoppingStore() {
       Object.values(memberUnsubsRef.current).forEach((u) => u());
       itemUnsubsRef.current = {};
       memberUnsubsRef.current = {};
+      pendingWritesBySourceRef.current = {};
+      optimisticOpsRef.current = {};
+      setOptimisticOpsByList({});
+      setHasPendingCloudWrites(false);
       return;
     }
 
@@ -619,10 +968,12 @@ export function useShoppingStore() {
       Object.values(memberUnsubsRef.current).forEach((u) => u());
       itemUnsubsRef.current = {};
       memberUnsubsRef.current = {};
+      pendingWritesBySourceRef.current = {};
       setCloudListsMap({});
       setCloudItemsMap({});
       setCloudMembersMap({});
       setCloudRecipes(null);
+      setHasPendingCloudWrites(false);
       setAuthError('Sua conta Google precisa estar com o e-mail verificado para sincronizar.');
       return;
     }
@@ -634,16 +985,24 @@ export function useShoppingStore() {
 
     const unsubLists = onSnapshot(
       listsQuery,
+      { includeMetadataChanges: true },
       (snapshot) => {
-        if (snapshot.empty && !snapshot.metadata.fromCache) {
-          void migrateLocalListsToCloud(user, localLists);
+        if (
+          snapshot.empty &&
+          !snapshot.metadata.fromCache &&
+          !pendingInviteCodeRef.current &&
+          !joiningInviteRef.current
+        ) {
+          void migrateLocalListsToCloud(user, localListsRef.current);
         }
+
+        updatePendingWritesFlag('lists', snapshot.metadata.hasPendingWrites);
 
         const nextLists: Record<string, ShoppingList> = {};
         const activeIds = new Set<string>();
 
         snapshot.docs.forEach((docSnap) => {
-          const data = docSnap.data();
+          const data = docSnap.data({ serverTimestamps: 'estimate' });
           const listId = docSnap.id;
           activeIds.add(listId);
 
@@ -660,62 +1019,7 @@ export function useShoppingStore() {
             isSynced: true,
           };
 
-          if (!itemUnsubsRef.current[listId]) {
-            const itemsPath = `lists/${listId}/items`;
-            itemUnsubsRef.current[listId] = onSnapshot(
-              collection(db, 'lists', listId, 'items'),
-              (itemsSnap) => {
-                const parsedItems: ShoppingItem[] = itemsSnap.docs.map((itemDoc) => {
-                  const d = itemDoc.data();
-                  return {
-                    id: itemDoc.id,
-                    name: String(d.name ?? ''),
-                    quantity: Number(d.quantity ?? 1),
-                    unit: (d.unit as UnitType) ?? 'un',
-                    price: typeof d.price === 'number' ? d.price : null,
-                    category: (d.category as CategoryId) ?? 'outros',
-                    checked: Boolean(d.checked),
-                    note: typeof d.note === 'string' && d.note ? d.note : undefined,
-                    emoji:
-                      typeof d.emoji === 'string' && d.emoji
-                        ? d.emoji
-                        : detectItemEmoji(String(d.name ?? ''), (d.category as CategoryId) ?? 'outros'),
-                    recipeId: typeof d.recipeId === 'string' && d.recipeId ? d.recipeId : undefined,
-                    recipeName:
-                      typeof d.recipeName === 'string' && d.recipeName ? d.recipeName : undefined,
-                    addedBy: typeof d.addedBy === 'string' ? d.addedBy : undefined,
-                    createdAt: toMillis(d.createdAt),
-                  };
-                });
-                setCloudItemsMap((prev) => ({ ...prev, [listId]: parsedItems }));
-              },
-              (err) => {
-                handleFirestoreError(err, OperationType.LIST, itemsPath);
-              }
-            );
-          }
-
-          if (!memberUnsubsRef.current[listId]) {
-            const membersPath = `lists/${listId}/members`;
-            memberUnsubsRef.current[listId] = onSnapshot(
-              collection(db, 'lists', listId, 'members'),
-              (membersSnap) => {
-                const parsedMembers: ListMember[] = membersSnap.docs.map((mDoc) => {
-                  const d = mDoc.data();
-                  return {
-                    uid: String(d.uid ?? mDoc.id),
-                    displayName: String(d.displayName ?? 'Participante'),
-                    role: d.role === 'owner' ? 'owner' : 'editor',
-                    joinedAt: toMillis(d.joinedAt),
-                  };
-                });
-                setCloudMembersMap((prev) => ({ ...prev, [listId]: parsedMembers }));
-              },
-              (err) => {
-                handleFirestoreError(err, OperationType.LIST, membersPath);
-              }
-            );
-          }
+          attachListSubListeners(listId);
         });
 
         // Cleanup listeners for removed/left lists
@@ -723,6 +1027,7 @@ export function useShoppingStore() {
           if (!activeIds.has(id)) {
             itemUnsubsRef.current[id]();
             delete itemUnsubsRef.current[id];
+            updatePendingWritesFlag(`items:${id}`, false);
           }
         });
         Object.keys(memberUnsubsRef.current).forEach((id) => {
@@ -732,10 +1037,15 @@ export function useShoppingStore() {
           }
         });
 
+        cloudListsMapRef.current = nextLists;
         setCloudListsMap(nextLists);
+        if (!snapshot.metadata.fromCache) {
+          setSyncError(null);
+        }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, 'lists');
+        const msg = reportFirestoreError(err, OperationType.LIST, 'lists');
+        setSyncError(msg);
       }
     );
 
@@ -748,11 +1058,11 @@ export function useShoppingStore() {
       recipesQuery,
       (snapshot) => {
         if (snapshot.empty && !snapshot.metadata.fromCache) {
-          void migrateLocalRecipesToCloud(user, localRecipes);
+          void migrateLocalRecipesToCloud(user, localRecipesRef.current);
         }
         const parsed: Recipe[] = snapshot.docs
           .map((rDoc) => {
-            const d = rDoc.data();
+            const d = rDoc.data({ serverTimestamps: 'estimate' });
             const rawIngredients = Array.isArray(d.ingredients) ? d.ingredients : [];
             const ingredients: RecipeIngredient[] = rawIngredients
               .map(sanitizeRecipeIngredient)
@@ -772,31 +1082,57 @@ export function useShoppingStore() {
         setCloudRecipes(parsed);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, recipesPath);
+        const msg = reportFirestoreError(err, OperationType.LIST, recipesPath);
+        setSyncError(msg);
       }
     );
+
+    const handleVisibilityOrOnline = () => {
+      if (document.visibilityState === 'visible') {
+        void syncNow(true);
+      }
+    };
+    const handleOnline = () => {
+      void syncNow(true);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrOnline);
+    window.addEventListener('focus', handleOnline);
+    window.addEventListener('online', handleOnline);
 
     return () => {
       unsubLists();
       unsubRecipes();
+      document.removeEventListener('visibilitychange', handleVisibilityOrOnline);
+      window.removeEventListener('focus', handleOnline);
+      window.removeEventListener('online', handleOnline);
       Object.values(itemUnsubsRef.current).forEach((u) => u());
       Object.values(memberUnsubsRef.current).forEach((u) => u());
       itemUnsubsRef.current = {};
       memberUnsubsRef.current = {};
+      pendingWritesBySourceRef.current = {};
     };
-  }, [authReady, user, migrateLocalListsToCloud, migrateLocalRecipesToCloud]);
+  }, [
+    authReady,
+    user,
+    attachListSubListeners,
+    migrateLocalListsToCloud,
+    migrateLocalRecipesToCloud,
+    syncNow,
+    updatePendingWritesFlag,
+  ]);
 
   // Combine cloud lists when logged in, otherwise localLists
   const lists: ShoppingList[] = useMemo(() => {
     if (!user) return localLists;
     const cloudValues = Object.values(cloudListsMap).map((l) => ({
       ...l,
-      items: cloudItemsMap[l.id] ?? [],
+      items: mergeListItems(cloudItemsMap[l.id] ?? [], optimisticOpsByList[l.id]),
       members: cloudMembersMap[l.id] ?? [],
     }));
     if (cloudValues.length === 0) return localLists;
     return cloudValues.sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [user, localLists, cloudListsMap, cloudItemsMap, cloudMembersMap]);
+  }, [user, localLists, cloudListsMap, cloudItemsMap, cloudMembersMap, optimisticOpsByList]);
 
   const recipes: Recipe[] = useMemo(() => {
     if (!user || cloudRecipes === null) return localRecipes;
@@ -804,8 +1140,19 @@ export function useShoppingStore() {
     return cloudRecipes;
   }, [user, cloudRecipes, localRecipes]);
 
-  // Ensure activeListId always points to a valid list
+  // Ensure activeListId always points to a valid list without clobbering newly joined/created cloud lists
   useEffect(() => {
+    const pendingTarget = pendingTargetListIdRef.current;
+    if (pendingTarget) {
+      if (lists.some((l) => l.id === pendingTarget)) {
+        if (activeListId !== pendingTarget) {
+          setActiveListId(pendingTarget);
+        }
+        pendingTargetListIdRef.current = null;
+      }
+      return;
+    }
+
     if (lists.length > 0 && !lists.some((l) => l.id === activeListId)) {
       setActiveListId(lists[0].id);
     }
@@ -815,6 +1162,11 @@ export function useShoppingStore() {
     () => lists.find((l) => l.id === activeListId) ?? lists[0],
     [lists, activeListId]
   );
+
+  const selectActiveList = useCallback((listId: string) => {
+    pendingTargetListIdRef.current = null;
+    setActiveListId(listId);
+  }, []);
 
   const loginWithGoogle = useCallback(async () => {
     if (loginInFlightRef.current) return;
@@ -980,7 +1332,9 @@ export function useShoppingStore() {
 
       // Check if already a member
       if (cloudListsMap[targetListId]) {
+        pendingTargetListIdRef.current = targetListId;
         setActiveListId(targetListId);
+        void syncNow(true, targetListId);
         return { listName, alreadyMember: true };
       }
 
@@ -1006,10 +1360,12 @@ export function useShoppingStore() {
         handleFirestoreError(err, OperationType.WRITE, `lists/${targetListId}`);
       }
 
+      pendingTargetListIdRef.current = targetListId;
       setActiveListId(targetListId);
+      await syncNow(true, targetListId);
       return { listName, alreadyMember: false };
     },
-    [user, cloudListsMap]
+    [user, cloudListsMap, syncNow]
   );
 
   const regenerateInviteCode = useCallback(
@@ -1064,16 +1420,24 @@ export function useShoppingStore() {
     [user, cloudListsMap]
   );
 
-  // Auto-join pending invite code once signed in
+  // Auto-join pending invite code once signed in with verified email
   useEffect(() => {
-    if (!authReady || !user || !pendingInviteCode) return;
+    if (!authReady || !user || !user.emailVerified || !pendingInviteCode) return;
     const code = pendingInviteCode;
+    joiningInviteRef.current = true;
     setPendingInviteCode(null);
     sessionStorage.removeItem(PENDING_INVITE_KEY);
-    void joinListByCode(code).catch((err) => {
-      setAuthError(err instanceof Error ? err.message : 'Erro ao entrar na lista.');
-    });
-  }, [authReady, user, pendingInviteCode, joinListByCode]);
+    void joinListByCode(code)
+      .catch((err) => {
+        setAuthError(err instanceof Error ? err.message : 'Erro ao entrar na lista.');
+        if (Object.keys(cloudListsMapRef.current).length === 0) {
+          void migrateLocalListsToCloud(user, localListsRef.current);
+        }
+      })
+      .finally(() => {
+        joiningInviteRef.current = false;
+      });
+  }, [authReady, user, pendingInviteCode, joinListByCode, migrateLocalListsToCloud]);
 
   const setPrimaryTheme = useCallback((id: string) => {
     setPrimaryThemeId(getPrimaryTheme(id).id);
@@ -1135,9 +1499,11 @@ export function useShoppingStore() {
       });
 
       try {
+        pendingTargetListIdRef.current = listId;
         await batch.commit();
         setActiveListId(listId);
       } catch (err) {
+        pendingTargetListIdRef.current = null;
         handleFirestoreError(err, OperationType.CREATE, `lists/${listId}`);
       }
     },
@@ -1296,8 +1662,10 @@ export function useShoppingStore() {
           }
           await itemBatch.commit();
         }
+        pendingTargetListIdRef.current = newListId;
         setActiveListId(newListId);
       } catch (err) {
+        pendingTargetListIdRef.current = null;
         handleFirestoreError(err, OperationType.CREATE, `lists/${newListId}`);
       }
     },
@@ -1383,7 +1751,7 @@ export function useShoppingStore() {
     async (input: AddItemInput, targetListId?: string) => {
       const name = sanitizeText(input.name, 100);
       if (!name) return;
-      const listId = targetListId ?? activeList?.id;
+      const listId = targetListId ?? activeListIdRef.current ?? activeList?.id;
       if (!listId) return;
 
       const qty = Math.min(10000, Math.max(0.1, Number(input.quantity) || 1));
@@ -1397,7 +1765,7 @@ export function useShoppingStore() {
       const note = cleanNote || null;
       const emoji = sanitizeText(input.emoji, 16) || detectItemEmoji(name, category);
 
-      if (!user || !cloudListsMap[listId]) {
+      if (!user || !cloudListsMapRef.current[listId]) {
         setLocalLists((prev) =>
           prev.map((list) => {
             if (list.id !== listId) return list;
@@ -1434,30 +1802,60 @@ export function useShoppingStore() {
         return;
       }
 
-      const currentItems = cloudItemsMap[listId] ?? [];
+      const currentItems = mergeListItems(
+        cloudItemsMapRef.current[listId] ?? [],
+        optimisticOpsRef.current[listId]
+      );
       const existing = currentItems.find(
         (i) => i.name.toLowerCase() === name.toLowerCase() && i.unit === unit && !i.checked
       );
 
       if (existing) {
         const nextQty = Math.min(10000, Number((existing.quantity + qty).toFixed(2)));
+        const nextPrice = price !== null ? price : existing.price;
+        const nextNote = note || existing.note || null;
+        const nextEmoji = input.emoji?.trim() || existing.emoji || emoji;
         const itemPath = `lists/${listId}/items/${existing.id}`;
+        const seq = applyOptimisticOp(listId, existing.id, {
+          patch: {
+            quantity: nextQty,
+            price: nextPrice,
+            note: nextNote ?? undefined,
+            emoji: nextEmoji,
+          },
+        });
         try {
           await updateDoc(doc(db, 'lists', listId, 'items', existing.id), {
             quantity: nextQty,
-            price: price !== null ? price : existing.price,
-            note: note || existing.note || null,
-            emoji: input.emoji?.trim() || existing.emoji || emoji,
+            price: nextPrice,
+            note: nextNote,
+            emoji: nextEmoji,
             updatedAt: serverTimestamp(),
           });
+          settleOptimisticOp(listId, existing.id, seq);
         } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, itemPath);
+          rollbackOptimisticOp(listId, existing.id, seq);
+          setSyncError(reportFirestoreError(err, OperationType.UPDATE, itemPath));
         }
         return;
       }
 
       const itemId = generateSafeId('item');
       const itemPath = `lists/${listId}/items/${itemId}`;
+      const optimisticItem: ShoppingItem = {
+        id: itemId,
+        name,
+        quantity: qty,
+        unit,
+        price,
+        category,
+        checked: false,
+        note: note ?? undefined,
+        emoji,
+        addedBy: user.uid,
+        createdAt: Date.now(),
+      };
+      const seq = applyOptimisticOp(listId, itemId, { createdItem: optimisticItem });
       try {
         await setDoc(doc(db, 'lists', listId, 'items', itemId), {
           name,
@@ -1472,19 +1870,21 @@ export function useShoppingStore() {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+        settleOptimisticOp(listId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, itemPath);
+        rollbackOptimisticOp(listId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.CREATE, itemPath));
       }
     },
-    [activeList?.id, user, cloudListsMap, cloudItemsMap]
+    [activeList?.id, user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const toggleItem = useCallback(
     async (itemId: string) => {
-      if (!activeList) return;
-      const listId = activeList.id;
+      const listId = activeListIdRef.current ?? activeList?.id;
+      if (!listId) return;
 
-      if (!user || !cloudListsMap[listId]) {
+      if (!user || !cloudListsMapRef.current[listId]) {
         setLocalLists((prev) =>
           prev.map((list) =>
             list.id === listId
@@ -1501,27 +1901,39 @@ export function useShoppingStore() {
         return;
       }
 
-      const target = activeList.items.find((i) => i.id === itemId);
+      const currentItems = mergeListItems(
+        cloudItemsMapRef.current[listId] ?? [],
+        optimisticOpsRef.current[listId]
+      );
+      const target = currentItems.find((i) => i.id === itemId);
       if (!target) return;
+
+      const nextChecked = !target.checked;
       const itemPath = `lists/${listId}/items/${itemId}`;
+      const seq = applyOptimisticOp(listId, itemId, {
+        patch: { checked: nextChecked },
+      });
+
       try {
         await updateDoc(doc(db, 'lists', listId, 'items', itemId), {
-          checked: !target.checked,
+          checked: nextChecked,
           updatedAt: serverTimestamp(),
         });
+        settleOptimisticOp(listId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, itemPath);
+        rollbackOptimisticOp(listId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, itemPath));
       }
     },
-    [activeList, user, cloudListsMap]
+    [activeList?.id, user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const updateItem = useCallback(
     async (itemId: string, patch: Partial<Omit<ShoppingItem, 'id' | 'createdAt'>>) => {
-      if (!activeList) return;
-      const listId = activeList.id;
+      const listId = activeListIdRef.current ?? activeList?.id;
+      if (!listId) return;
 
-      if (!user || !cloudListsMap[listId]) {
+      if (!user || !cloudListsMapRef.current[listId]) {
         setLocalLists((prev) =>
           prev.map((list) =>
             list.id === listId
@@ -1539,54 +1951,81 @@ export function useShoppingStore() {
       }
 
       const payload: Record<string, unknown> = { updatedAt: serverTimestamp() };
+      const localPatch: Partial<ShoppingItem> = {};
       if (patch.name !== undefined) {
         const cleanName = sanitizeText(patch.name, 100);
-        if (cleanName) payload.name = cleanName;
+        if (cleanName) {
+          payload.name = cleanName;
+          localPatch.name = cleanName;
+        }
       }
-      if (patch.quantity !== undefined)
-        payload.quantity = Math.min(10000, Math.max(0.1, Number(patch.quantity) || 1));
-      if (patch.unit !== undefined) payload.unit = sanitizeUnit(patch.unit);
-      if (patch.price !== undefined)
-        payload.price =
+      if (patch.quantity !== undefined) {
+        const cleanQty = Math.min(10000, Math.max(0.1, Number(patch.quantity) || 1));
+        payload.quantity = cleanQty;
+        localPatch.quantity = cleanQty;
+      }
+      if (patch.unit !== undefined) {
+        const cleanUnit = sanitizeUnit(patch.unit);
+        payload.unit = cleanUnit;
+        localPatch.unit = cleanUnit;
+      }
+      if (patch.price !== undefined) {
+        const cleanPrice =
           patch.price !== null && Number.isFinite(patch.price) && patch.price >= 0
             ? Math.min(1000000, patch.price)
             : null;
-      if (patch.category !== undefined) {
-        payload.category = sanitizeCategory(patch.category, patch.name ?? '');
+        payload.price = cleanPrice;
+        localPatch.price = cleanPrice;
       }
-      if (patch.checked !== undefined) payload.checked = Boolean(patch.checked);
+      if (patch.category !== undefined) {
+        const cleanCategory = sanitizeCategory(patch.category, patch.name ?? '');
+        payload.category = cleanCategory;
+        localPatch.category = cleanCategory;
+      }
+      if (patch.checked !== undefined) {
+        const cleanChecked = Boolean(patch.checked);
+        payload.checked = cleanChecked;
+        localPatch.checked = cleanChecked;
+      }
       if (patch.note !== undefined) {
         const cleanNote = sanitizeText(patch.note, 160);
         payload.note = cleanNote || null;
+        localPatch.note = cleanNote || undefined;
       }
       if (patch.emoji !== undefined) {
         const cleanEmoji = sanitizeText(patch.emoji, 16);
         payload.emoji = cleanEmoji || null;
+        localPatch.emoji = cleanEmoji || undefined;
       }
 
       const itemPath = `lists/${listId}/items/${itemId}`;
+      const seq = applyOptimisticOp(listId, itemId, { patch: localPatch });
       try {
         await updateDoc(doc(db, 'lists', listId, 'items', itemId), payload);
+        settleOptimisticOp(listId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, itemPath);
+        rollbackOptimisticOp(listId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, itemPath));
       }
     },
-    [activeList, user, cloudListsMap]
+    [activeList?.id, user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const stepQuantity = useCallback(
     async (itemId: string, delta: number) => {
-      if (!activeList) return;
-      const listId = activeList.id;
-      const target = activeList.items.find((i) => i.id === itemId);
-      if (!target) return;
-      const step = target.unit === 'kg' || target.unit === 'L' ? 0.5 : 1;
-      const nextQty = Math.min(
-        10000,
-        Math.max(step, Number((target.quantity + delta * step).toFixed(2)))
-      );
+      const listId = activeListIdRef.current ?? activeList?.id;
+      if (!listId) return;
 
-      if (!user || !cloudListsMap[listId]) {
+      if (!user || !cloudListsMapRef.current[listId]) {
+        const localTarget = localListsRef.current
+          .find((l) => l.id === listId)
+          ?.items.find((i) => i.id === itemId);
+        if (!localTarget) return;
+        const step = localTarget.unit === 'kg' || localTarget.unit === 'L' ? 0.5 : 1;
+        const nextQty = Math.min(
+          10000,
+          Math.max(step, Number((localTarget.quantity + delta * step).toFixed(2)))
+        );
         setLocalLists((prev) =>
           prev.map((list) =>
             list.id === listId
@@ -1603,25 +2042,41 @@ export function useShoppingStore() {
         return;
       }
 
+      const currentItems = mergeListItems(
+        cloudItemsMapRef.current[listId] ?? [],
+        optimisticOpsRef.current[listId]
+      );
+      const target = currentItems.find((i) => i.id === itemId);
+      if (!target) return;
+
+      const step = target.unit === 'kg' || target.unit === 'L' ? 0.5 : 1;
+      const nextQty = Math.min(
+        10000,
+        Math.max(step, Number((target.quantity + delta * step).toFixed(2)))
+      );
+
       const itemPath = `lists/${listId}/items/${itemId}`;
+      const seq = applyOptimisticOp(listId, itemId, { patch: { quantity: nextQty } });
       try {
         await updateDoc(doc(db, 'lists', listId, 'items', itemId), {
           quantity: nextQty,
           updatedAt: serverTimestamp(),
         });
+        settleOptimisticOp(listId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, itemPath);
+        rollbackOptimisticOp(listId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.UPDATE, itemPath));
       }
     },
-    [activeList, user, cloudListsMap]
+    [activeList?.id, user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const deleteItem = useCallback(
     async (itemId: string) => {
-      if (!activeList) return;
-      const listId = activeList.id;
+      const listId = activeListIdRef.current ?? activeList?.id;
+      if (!listId) return;
 
-      if (!user || !cloudListsMap[listId]) {
+      if (!user || !cloudListsMapRef.current[listId]) {
         setLocalLists((prev) =>
           prev.map((list) =>
             list.id === listId
@@ -1637,13 +2092,16 @@ export function useShoppingStore() {
       }
 
       const itemPath = `lists/${listId}/items/${itemId}`;
+      const seq = applyOptimisticOp(listId, itemId, { deleted: true });
       try {
         await deleteDoc(doc(db, 'lists', listId, 'items', itemId));
+        settleOptimisticOp(listId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, itemPath);
+        rollbackOptimisticOp(listId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.DELETE, itemPath));
       }
     },
-    [activeList, user, cloudListsMap]
+    [activeList?.id, user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const restoreItem = useCallback(
@@ -1659,8 +2117,15 @@ export function useShoppingStore() {
           : null;
       const note = item.note?.trim() ? item.note.trim().slice(0, 160) : null;
       const emoji = (item.emoji?.trim() || detectItemEmoji(cleanName, category)).slice(0, 16);
+      const safeRecipeId =
+        typeof item.recipeId === 'string' && SAFE_ID_REGEX.test(item.recipeId.trim())
+          ? item.recipeId.trim().slice(0, 128)
+          : null;
+      const safeRecipeName = item.recipeName?.trim()
+        ? item.recipeName.trim().slice(0, 80)
+        : null;
 
-      if (!user || !cloudListsMap[targetListId]) {
+      if (!user || !cloudListsMapRef.current[targetListId]) {
         setLocalLists((prev) =>
           prev.map((list) => {
             if (list.id !== targetListId) return list;
@@ -1683,6 +2148,22 @@ export function useShoppingStore() {
 
       const itemId = generateSafeId('item');
       const itemPath = `lists/${targetListId}/items/${itemId}`;
+      const optimisticItem: ShoppingItem = {
+        id: itemId,
+        name: cleanName,
+        quantity: qty,
+        unit,
+        price,
+        category,
+        checked: Boolean(item.checked),
+        note: note ?? undefined,
+        emoji,
+        recipeId: safeRecipeId ?? undefined,
+        recipeName: safeRecipeName ?? undefined,
+        addedBy: user.uid,
+        createdAt: Date.now(),
+      };
+      const seq = applyOptimisticOp(targetListId, itemId, { createdItem: optimisticItem });
       try {
         await setDoc(doc(db, 'lists', targetListId, 'items', itemId), {
           name: cleanName,
@@ -1693,17 +2174,19 @@ export function useShoppingStore() {
           checked: Boolean(item.checked),
           note,
           emoji,
-          recipeId: item.recipeId ?? null,
-          recipeName: item.recipeName ?? null,
+          recipeId: safeRecipeId,
+          recipeName: safeRecipeName,
           addedBy: user.uid,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+        settleOptimisticOp(targetListId, itemId, seq);
       } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, itemPath);
+        rollbackOptimisticOp(targetListId, itemId, seq);
+        setSyncError(reportFirestoreError(err, OperationType.CREATE, itemPath));
       }
     },
-    [user, cloudListsMap]
+    [user, applyOptimisticOp, settleOptimisticOp, rollbackOptimisticOp]
   );
 
   const saveRecipe = useCallback(
@@ -2160,11 +2643,22 @@ export function useShoppingStore() {
     setActiveListId(INITIAL_LISTS[0].id);
   }, []);
 
+  const hasOptimisticInFlight = useMemo(
+    () =>
+      Object.values(optimisticOpsByList).some((ops) =>
+        Object.values(ops).some((op) => !op.settled)
+      ),
+    [optimisticOpsByList]
+  );
+
+  const isSyncing = hasPendingCloudWrites || isRefreshingSync || hasOptimisticInFlight;
+  const clearSyncError = useCallback(() => setSyncError(null), []);
+
   return {
     lists,
     activeList,
     activeListId,
-    setActiveListId,
+    setActiveListId: selectActiveList,
     recipes,
     isRecipeApplied,
     saveRecipe,
@@ -2175,6 +2669,10 @@ export function useShoppingStore() {
     authReady,
     authLoading,
     authError,
+    syncError,
+    clearSyncError,
+    isSyncing,
+    syncNow: () => syncNow(false),
     pendingInviteCode,
     loginWithGoogle,
     logout,

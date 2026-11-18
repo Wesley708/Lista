@@ -31,6 +31,7 @@ try {
       localCache: persistentLocalCache({
         tabManager: persistentMultipleTabManager(),
       }),
+      experimentalAutoDetectLongPolling: true,
     },
     firebaseConfig.firestoreDatabaseId
   );
@@ -68,11 +69,11 @@ export interface FirestoreErrorInfo {
   };
 }
 
-export function handleFirestoreError(
+export function reportFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): never {
+): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
   const errInfo: FirestoreErrorInfo = {
     error: redactPII(rawMessage),
@@ -90,7 +91,27 @@ export function handleFirestoreError(
     path,
   };
   console.error('Firestore Error:', JSON.stringify(errInfo));
-  throw new Error('Não foi possível concluir a sincronização com a nuvem.');
+
+  const normalized = rawMessage.toLowerCase();
+  if (normalized.includes('permission') || normalized.includes('insufficient')) {
+    return 'Sem permissão para sincronizar este item. Verifique se você ainda participa desta lista.';
+  }
+  if (normalized.includes('quota')) {
+    return 'Limite diário de sincronização atingido. Tente novamente mais tarde.';
+  }
+  if (normalized.includes('unavailable') || normalized.includes('offline') || normalized.includes('network')) {
+    return 'Conexão instável. As alterações serão enviadas assim que a internet voltar.';
+  }
+  return 'Não foi possível concluir a sincronização com a nuvem.';
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
+  const friendlyMessage = reportFirestoreError(error, operationType, path);
+  throw new Error(friendlyMessage);
 }
 
 async function testConnection() {

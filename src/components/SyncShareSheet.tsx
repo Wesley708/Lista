@@ -25,9 +25,12 @@ interface SyncShareSheetProps {
   user: User | null;
   authLoading: boolean;
   authError: string | null;
+  syncError?: string | null;
+  isSyncing?: boolean;
   activeList: ShoppingList | undefined;
   onLogin: () => Promise<void>;
   onLogout: () => Promise<void>;
+  onSyncNow?: () => Promise<void>;
   onJoinByCode: (code: string) => Promise<{ listName: string; alreadyMember: boolean }>;
   onRegenerateInviteCode: (listId: string) => Promise<string>;
   onRemoveMember: (listId: string, memberUid: string) => Promise<void>;
@@ -39,9 +42,12 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
   user,
   authLoading,
   authError,
+  syncError,
+  isSyncing = false,
   activeList,
   onLogin,
   onLogout,
+  onSyncNow,
   onJoinByCode,
   onRegenerateInviteCode,
   onRemoveMember,
@@ -202,16 +208,16 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
               </button>
             </div>
 
-            {(authError || feedback) && (
+            {(authError || syncError || feedback) && (
               <div
                 role="status"
                 className={`mt-4 rounded-xl px-3.5 py-2.5 text-xs font-medium border ${
-                  authError || feedback?.type === 'err'
+                  authError || syncError || feedback?.type === 'err'
                     ? 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/30'
                     : 'bg-accent-soft text-ink border-accent/30'
                 }`}
               >
-                {authError || feedback?.text}
+                {authError || syncError || feedback?.text}
               </div>
             )}
 
@@ -235,22 +241,39 @@ export const SyncShareSheet: React.FC<SyncShareSheetProps> = ({
               </div>
             ) : (
               <div className="mt-5 space-y-5">
-                <div className="flex items-center justify-between gap-3 border-t border-line pt-4">
+                <div className="flex items-center justify-between gap-2 border-t border-line pt-4">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-ink">
                       {user.displayName || 'Conta conectada'}
                     </p>
                     <p className="truncate text-xs text-ink-muted">{user.email}</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void onLogout()}
-                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-ink-muted hover:bg-surface-muted whitespace-nowrap shrink-0"
-                    title="Sai da conta e limpa os dados locais deste aparelho"
-                  >
-                    <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Sair</span>
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {onSyncNow && (
+                      <button
+                        type="button"
+                        disabled={isSyncing}
+                        onClick={() => void onSyncNow()}
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-accent-ink hover:bg-accent-soft disabled:opacity-60 whitespace-nowrap"
+                        title="Forçar atualização imediata da lista"
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`}
+                          aria-hidden="true"
+                        />
+                        <span>{isSyncing ? 'Atualizando' : 'Atualizar'}</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void onLogout()}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-ink-muted hover:bg-surface-muted whitespace-nowrap"
+                      title="Sai da conta e limpa os dados locais deste aparelho"
+                    >
+                      <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Sair</span>
+                    </button>
+                  </div>
                 </div>
 
                 {activeList?.isSynced && inviteCode && (

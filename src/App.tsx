@@ -9,6 +9,7 @@ import {
   Layers,
   ListTodo,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   ShoppingBag,
@@ -17,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import { BrandTitle } from './components/BrandTitle';
 import { ItemEditSheet } from './components/ItemEditSheet';
 import { ListsManagerView } from './components/ListsManagerView';
 import { ListSummaryCard } from './components/ListSummaryCard';
@@ -48,6 +50,10 @@ export default function App() {
     user,
     authLoading,
     authError,
+    syncError,
+    clearSyncError,
+    isSyncing,
+    syncNow,
     pendingInviteCode,
     loginWithGoogle,
     logout,
@@ -120,6 +126,24 @@ export default function App() {
       setStatusToast(null);
     }, 4000);
   };
+
+  useEffect(() => {
+    if (!syncError) return;
+    setStatusToast({
+      text: syncError,
+      actionLabel: 'Tentar de novo',
+      onAction: () => {
+        clearSyncError();
+        setStatusToast(null);
+        void syncNow();
+      },
+    });
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setStatusToast(null);
+      clearSyncError();
+    }, 5500);
+  }, [syncError, clearSyncError, syncNow]);
 
   const handleDeleteWithUndo = (itemId: string) => {
     if (!activeList) return;
@@ -280,16 +304,7 @@ export default function App() {
       {/* Desktop Top Bar (3-Zone Contract) */}
       <header className="hidden lg:block sticky top-0 z-30 border-b border-line bg-canvas/90 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-8 px-6">
-          <a
-            href="#top"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveTab('lista');
-            }}
-            className="font-display text-xl font-bold tracking-tight text-ink whitespace-nowrap shrink-0"
-          >
-            Lista de Compras
-          </a>
+          <BrandTitle size="md" onClick={() => setActiveTab('lista')} />
 
           <nav className="flex items-center gap-7 text-sm font-medium">
             {(
@@ -331,9 +346,7 @@ export default function App() {
       {/* Mobile Compact Top App Bar (52px) */}
       <header className="lg:hidden sticky top-0 z-30 border-b border-line bg-canvas/90 backdrop-blur-md">
         <div className="flex h-[52px] items-center justify-between gap-3 px-4">
-          <span className="font-display text-lg font-bold tracking-tight text-ink whitespace-nowrap shrink-0">
-            Lista de Compras
-          </span>
+          <BrandTitle size="sm" onClick={() => setActiveTab('lista')} />
           <div className="flex items-center gap-2">
             <PWAInstallButton variant="compact" />
           </div>
@@ -406,9 +419,24 @@ export default function App() {
                       {user && activeList.isSynced && (
                         <>
                           <span aria-hidden="true"> · </span>
-                          <span className="text-accent-ink font-medium">
-                            {memberCount > 1 ? `${memberCount} pessoas` : 'Sincronizada'}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void syncNow()}
+                            title="Atualizar lista agora"
+                            className="inline-flex items-center gap-1 font-medium text-accent-ink hover:opacity-80 active:scale-95 transition-all"
+                          >
+                            <RefreshCw
+                              className={`h-3 w-3 ${isSyncing ? 'animate-spin' : ''}`}
+                              aria-hidden="true"
+                            />
+                            <span>
+                              {isSyncing
+                                ? 'Sincronizando...'
+                                : memberCount > 1
+                                  ? `${memberCount} pessoas`
+                                  : 'Sincronizada'}
+                            </span>
+                          </button>
                         </>
                       )}
                     </p>
@@ -969,9 +997,12 @@ export default function App() {
         user={user}
         authLoading={authLoading}
         authError={authError}
+        syncError={syncError}
+        isSyncing={isSyncing}
         activeList={activeList}
         onLogin={loginWithGoogle}
         onLogout={logout}
+        onSyncNow={syncNow}
         onJoinByCode={joinListByCode}
         onRegenerateInviteCode={regenerateInviteCode}
         onRemoveMember={removeMember}
