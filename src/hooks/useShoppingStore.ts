@@ -1021,7 +1021,6 @@ export function useShoppingStore() {
       setIsRefreshingSync(true);
 
       try {
-        await enableNetwork(db).catch(() => {});
         const listsQuery = query(
           collection(db, 'lists'),
           where('memberIds', 'array-contains', user!.uid)
@@ -1245,7 +1244,6 @@ export function useShoppingStore() {
 
     const handleResume = () => {
       if (document.visibilityState === 'visible') {
-        void enableNetwork(db).catch(() => {});
         void syncNow(true);
       }
     };
@@ -1255,15 +1253,7 @@ export function useShoppingStore() {
     window.addEventListener('focus', handleResume);
     window.addEventListener('online', handleResume);
 
-    // Active watchdog every 3s while foregrounded to guarantee real-time parity on iOS WebKit
-    const watchdogTimer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void syncNow(true);
-      }
-    }, 3000);
-
     return () => {
-      clearInterval(watchdogTimer);
       unsubLists();
       unsubRecipes();
       document.removeEventListener('visibilitychange', handleResume);
