@@ -1,6 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <rect width="512" height="512" rx="112" fill="#15803D"/>
-  <path d="M176 196V168C176 123.817 211.817 88 256 88C300.183 88 336 123.817 336 168V196" stroke="#FFFFFF" stroke-width="28" stroke-linecap="round"/>
-  <path d="M128 196H384L404 392C406.209 413.648 389.222 432 367.467 432H144.533C122.778 432 105.791 413.648 108 392L128 196Z" fill="#FFFFFF"/>
-  <path d="M204 304L240 340L314 266" stroke="#15803D" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="512" height="512" rx="112" fill="#0D9488"/>
+  <path d="M188 214L228 142" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+  <path d="M324 214L284 142" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+  <rect x="114" y="206" width="284" height="38" rx="19" fill="#FFFFFF"/>
+  <path d="M138 250H374L350 362C346.4 378.9 331.5 391 314.2 391H197.8C180.5 391 165.6 378.9 162 362L138 250Z" fill="#FFFFFF"/>
+  <rect x="195" y="279" width="24" height="78" rx="12" transform="rotate(-7 207 318)" fill="#0D9488"/>
+  <rect x="244" y="279" width="24" height="78" rx="12" fill="#0D9488"/>
+  <rect x="293" y="279" width="24" height="78" rx="12" transform="rotate(7 305 318)" fill="#0D9488"/>
 </svg>
