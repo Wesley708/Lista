@@ -177,22 +177,30 @@ export const ShoppingItemRow: React.FC<ShoppingItemRowProps> = ({
               <div className="flex items-center rounded-lg border border-line/70 bg-canvas/50">
                 <button
                   type="button"
-                  onClick={() => onStepQuantity(item.id, -1)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    onStepQuantity(item.id, -1);
+                  }}
                   aria-label={`Diminuir quantidade de ${item.name}`}
-                  className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-l-lg text-ink-muted hover:bg-surface-muted hover:text-ink active:scale-90 focus-visible:outline-2 focus-visible:outline-accent transition-transform"
+                  className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-l-lg text-ink-muted hover:bg-surface-muted hover:text-ink active:scale-90 focus-visible:outline-2 focus-visible:outline-accent transition-transform select-none touch-manipulation"
                 >
                   <Minus className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
 
-                <span className="min-w-[1.5rem] text-center font-mono-tabular text-xs font-semibold text-ink tabular-nums">
+                <span className="min-w-[1.5rem] text-center font-mono-tabular text-xs font-semibold text-ink tabular-nums select-none">
                   {item.quantity}
                 </span>
 
                 <button
                   type="button"
-                  onClick={() => onStepQuantity(item.id, 1)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    onStepQuantity(item.id, 1);
+                  }}
                   aria-label={`Aumentar quantidade de ${item.name}`}
-                  className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-r-lg text-ink-muted hover:bg-surface-muted hover:text-ink active:scale-90 focus-visible:outline-2 focus-visible:outline-accent transition-transform"
+                  className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-r-lg text-ink-muted hover:bg-surface-muted hover:text-ink active:scale-90 focus-visible:outline-2 focus-visible:outline-accent transition-transform select-none touch-manipulation"
                 >
                   <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
