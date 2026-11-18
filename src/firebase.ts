@@ -16,6 +16,7 @@ import {
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
+  persistentSingleTabManager,
   terminate,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -23,13 +24,21 @@ import { redactPII } from './utils/security';
 
 const app = initializeApp(firebaseConfig);
 
+const isSafariOrIOS =
+  typeof navigator !== 'undefined' &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
+    (/^((?!chrome|android).)*safari/i.test(navigator.userAgent)));
+
 let dbInstance: Firestore;
 try {
   dbInstance = initializeFirestore(
     app,
     {
       localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
+        tabManager: isSafariOrIOS
+          ? persistentSingleTabManager({})
+          : persistentMultipleTabManager(),
       }),
     },
     firebaseConfig.firestoreDatabaseId

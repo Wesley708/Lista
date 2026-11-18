@@ -361,6 +361,7 @@ function toMillis(val: unknown): number {
 interface OptimisticItemOp {
   seq: number;
   settled: boolean;
+  createdAt: number;
   deleted?: boolean;
   patch?: Partial<ShoppingItem>;
   createdItem?: ShoppingItem;
@@ -374,13 +375,14 @@ function mergeListItems(
   const opEntries = Object.entries(ops);
   if (opEntries.length === 0) return cloudItems;
 
+  const now = Date.now();
   const result: ShoppingItem[] = [];
   const seenIds = new Set<string>();
 
   for (const item of cloudItems) {
     seenIds.add(item.id);
     const op = ops[item.id];
-    if (!op) {
+    if (!op || now - op.createdAt > 4000) {
       result.push(item);
       continue;
     }
@@ -389,6 +391,7 @@ function mergeListItems(
   }
 
   for (const [itemId, op] of opEntries) {
+    if (now - op.createdAt > 4000) continue;
     if (seenIds.has(itemId) || op.deleted || !op.createdItem) continue;
     const base = op.createdItem;
     result.unshift(op.patch ? { ...base, ...op.patch } : base);
@@ -798,9 +801,9 @@ export function useShoppingStore() {
   }, []);
 
   const applyOptimisticOp = useCallback(
-    (listId: string, itemId: string, op: Omit<OptimisticItemOp, 'seq' | 'settled'>): number => {
+    (listId: string, itemId: string, op: Omit<OptimisticItemOp, 'seq' | 'settled' | 'createdAt'>): number => {
       const seq = ++opSeqRef.current;
-      const nextOp: OptimisticItemOp = { ...op, seq, settled: false };
+      const nextOp: OptimisticItemOp = { ...op, seq, settled: false, createdAt: Date.now() };
       const prevForList = optimisticOpsRef.current[listId] ?? {};
       const nextForList = { ...prevForList, [itemId]: nextOp };
       optimisticOpsRef.current = { ...optimisticOpsRef.current, [listId]: nextForList };
@@ -877,8 +880,14 @@ export function useShoppingStore() {
       const prevForList = optimisticOpsRef.current[listId];
       if (!prevForList) return;
       let changed = false;
+      const now = Date.now();
       const nextForList = { ...prevForList };
       for (const [itemId, op] of Object.entries(prevForList)) {
+        if (now - op.createdAt > 4000) {
+          delete nextForList[itemId];
+          changed = true;
+          continue;
+        }
         if (!op.settled) continue;
         if (doesCloudMatchOp(cloudItems, itemId, op) || (!hasPendingWrites && !fromCache)) {
           delete nextForList[itemId];
@@ -1234,25 +1243,33 @@ export function useShoppingStore() {
       }
     );
 
-    const handleVisibilityOrOnline = () => {
+    const handleResume = () => {
       if (document.visibilityState === 'visible') {
+        void enableNetwork(db).catch(() => {});
         void syncNow(true);
       }
     };
-    const handleOnline = () => {
-      void syncNow(true);
-    };
 
-    document.addEventListener('visibilitychange', handleVisibilityOrOnline);
-    window.addEventListener('focus', handleOnline);
-    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleResume);
+    window.addEventListener('pageshow', handleResume);
+    window.addEventListener('focus', handleResume);
+    window.addEventListener('online', handleResume);
+
+    // Active watchdog every 3s while foregrounded to guarantee real-time parity on iOS WebKit
+    const watchdogTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncNow(true);
+      }
+    }, 3000);
 
     return () => {
+      clearInterval(watchdogTimer);
       unsubLists();
       unsubRecipes();
-      document.removeEventListener('visibilitychange', handleVisibilityOrOnline);
-      window.removeEventListener('focus', handleOnline);
-      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('pageshow', handleResume);
+      window.removeEventListener('focus', handleResume);
+      window.removeEventListener('online', handleResume);
       Object.values(itemUnsubsRef.current).forEach((u) => u());
       Object.values(memberUnsubsRef.current).forEach((u) => u());
       itemUnsubsRef.current = {};
