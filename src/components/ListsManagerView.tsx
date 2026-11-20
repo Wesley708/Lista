@@ -13,7 +13,7 @@ interface ListsManagerViewProps {
   onSelectList: (id: string) => void;
   onCreateList: (name: string, budget: number | null) => Promise<void> | void;
   onRenameList: (id: string, name: string, budget?: number | null) => Promise<void> | void;
-  onDuplicateList: (id: string) => Promise<void> | void;
+  onDuplicateList: (id: string, name?: string, budget?: number | null) => Promise<void> | void;
   onDeleteList: (id: string) => Promise<void> | void;
 }
 
@@ -34,6 +34,9 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editBudget, setEditBudget] = useState('');
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
+  const [duplicateName, setDuplicateName] = useState('');
+  const [duplicateBudget, setDuplicateBudget] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [busyActionKey, setBusyActionKey] = useState<string | null>(null);
 
@@ -60,6 +63,19 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
     try {
       await onRenameList(id, cleanName, parseBoundedBudget(editBudget));
       setEditingId(null);
+    } finally {
+      setBusyActionKey(null);
+    }
+  };
+
+  const handleConfirmDuplicate = async (e: React.FormEvent, id: string) => {
+    e.preventDefault();
+    const cleanName = sanitizeText(duplicateName, 80);
+    if (!cleanName || busyActionKey === `dup:${id}`) return;
+    setBusyActionKey(`dup:${id}`);
+    try {
+      await onDuplicateList(id, cleanName, parseBoundedBudget(duplicateBudget));
+      setDuplicatingId(null);
     } finally {
       setBusyActionKey(null);
     }
@@ -208,6 +224,65 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
             );
           }
 
+          if (duplicatingId === list.id) {
+            return (
+              <form
+                key={list.id}
+                onSubmit={(e) => handleConfirmDuplicate(e, list.id)}
+                className="rounded-2xl border border-accent bg-surface p-3.5 space-y-3"
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <h2 className="text-xs font-semibold text-ink">
+                    Copiar "{list.name}"
+                  </h2>
+                  <span className="font-mono-tabular text-[11px] text-ink-muted tabular-nums">
+                    {totalItems} {totalItems === 1 ? 'item' : 'itens'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    maxLength={80}
+                    value={duplicateName}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) => setDuplicateName(e.target.value)}
+                    placeholder="Nome da nova cópia"
+                    aria-label="Nome da lista copiada"
+                    className="min-h-[44px] rounded-xl border border-line bg-canvas px-3 text-sm text-ink focus:border-accent focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    maxLength={12}
+                    value={duplicateBudget}
+                    onChange={(e) => setDuplicateBudget(e.target.value)}
+                    placeholder="Meta R$ (opcional)"
+                    aria-label="Meta da lista copiada"
+                    className="min-h-[44px] rounded-xl border border-line bg-canvas px-3 font-mono-tabular text-sm text-ink focus:border-accent focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    disabled={busyActionKey === `dup:${list.id}`}
+                    className="min-h-[44px] rounded-xl bg-accent px-4 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-50"
+                  >
+                    {busyActionKey === `dup:${list.id}` ? 'Copiando...' : 'Criar cópia'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDuplicatingId(null)}
+                    className="min-h-[44px] rounded-xl px-4 text-xs font-medium text-ink-muted hover:bg-surface-muted"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            );
+          }
+
           return (
             <div
               key={list.id}
@@ -277,6 +352,8 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    setDuplicatingId(null);
+                    setConfirmDeleteId(null);
                     setEditingId(list.id);
                     setEditName(list.name);
                     setEditBudget(list.budget ? String(list.budget) : '');
@@ -291,10 +368,11 @@ export const ListsManagerView: React.FC<ListsManagerViewProps> = ({
                   disabled={busyActionKey === `dup:${list.id}`}
                   onClick={() => {
                     if (busyActionKey) return;
-                    setBusyActionKey(`dup:${list.id}`);
-                    void Promise.resolve(onDuplicateList(list.id)).finally(() =>
-                      setBusyActionKey(null)
-                    );
+                    setEditingId(null);
+                    setConfirmDeleteId(null);
+                    setDuplicatingId(list.id);
+                    setDuplicateName(sanitizeText(`${list.name} (Cópia)`, 80) || 'Lista (Cópia)');
+                    setDuplicateBudget(list.budget ? String(list.budget) : '');
                   }}
                   aria-label={`Duplicar ${list.name}`}
                   className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-ink-muted hover:bg-surface-muted hover:text-ink disabled:opacity-50"

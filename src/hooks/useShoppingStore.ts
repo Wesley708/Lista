@@ -1705,10 +1705,17 @@ export function useShoppingStore() {
   );
 
   const duplicateList = useCallback(
-    async (listId: string) => {
+    async (listId: string, customName?: string, customBudget?: number | null) => {
       const source = lists.find((l) => l.id === listId);
       if (!source) return;
-      const newName = sanitizeText(`${source.name} (Cópia)`, 80) || 'Lista (Cópia)';
+      const requestedName = customName !== undefined ? sanitizeText(customName, 80) : '';
+      const newName =
+        requestedName || sanitizeText(`${source.name} (Cópia)`, 80) || 'Lista (Cópia)';
+      const rawBudget = customBudget !== undefined ? customBudget : source.budget;
+      const safeBudget =
+        rawBudget !== null && Number.isFinite(rawBudget) && rawBudget >= 0
+          ? Math.min(MAX_MONEY_AMOUNT, rawBudget)
+          : null;
 
       if (!user) {
         const newId = generateSafeId('lista');
@@ -1716,6 +1723,7 @@ export function useShoppingStore() {
           ...source,
           id: newId,
           name: newName,
+          budget: safeBudget,
           updatedAt: Date.now(),
           items: source.items.map((item) => ({
             ...item,
@@ -1736,10 +1744,7 @@ export function useShoppingStore() {
       const headerBatch = writeBatch(db);
       headerBatch.set(doc(db, 'lists', newListId), {
         name: newName,
-        budget:
-          source.budget !== null && Number.isFinite(source.budget) && source.budget >= 0
-            ? Math.min(MAX_MONEY_AMOUNT, source.budget)
-            : null,
+        budget: safeBudget,
         ownerId: user.uid,
         inviteCode,
         memberIds: [user.uid],

@@ -799,7 +799,7 @@ export default function App() {
             }}
             onCreateList={(name, budget) => createList(name, budget)}
             onRenameList={(id, name, budget) => renameList(id, name, budget)}
-            onDuplicateList={(id) => duplicateList(id)}
+            onDuplicateList={(id, name, budget) => duplicateList(id, name, budget)}
             onDeleteList={(id) => deleteList(id)}
           />
         )}
