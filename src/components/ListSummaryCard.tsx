@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Check, RotateCcw, Share2, Trash2 } from 'lucide-react';
-import { formatBRL } from '../data/catalog';
-import { ShoppingList } from '../types/shopping';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { CATEGORY_MAP, formatBRL } from '../data/catalog';
+import { CategoryId, ShoppingList } from '../types/shopping';
 import { parseBoundedBudget } from '../utils/security';
 
 interface ListSummaryCardProps {
@@ -11,6 +12,61 @@ interface ListSummaryCardProps {
   onUncheckAll: () => void;
   getShareText: () => string;
 }
+
+const CATEGORY_CHART_COLORS: Record<CategoryId, string> = {
+  hortifruti: '#16A34A',
+  padaria: '#D97706',
+  acougue: '#E11D48',
+  laticinios: '#0EA5E9',
+  mercearia: '#2563EB',
+  bebidas: '#7C3AED',
+  limpeza: '#0D9488',
+  higiene: '#EC4899',
+  outros: '#64748B',
+};
+
+interface CategorySpendDatum {
+  id: CategoryId;
+  label: string;
+  value: number;
+  pct: number;
+  exactPct: number;
+  color: string;
+}
+
+interface CustomTooltipProps {
+  active?: boolean;
+  payload?: Array<{
+    payload?: CategorySpendDatum;
+  }>;
+}
+
+const CategoryChartTooltip: React.FC<CustomTooltipProps> = ({ active, payload }) => {
+  const datum = active ? payload?.[0]?.payload : undefined;
+  if (!datum) return null;
+
+  return (
+    <div className="rounded-xl border border-line bg-surface px-3 py-2 shadow-lg">
+      <div className="flex items-center gap-2">
+        <span
+          className="h-2.5 w-2.5 shrink-0 rounded-xs"
+          style={{ backgroundColor: datum.color }}
+          aria-hidden="true"
+        />
+        <span className="text-xs font-semibold text-ink">{datum.label}</span>
+      </div>
+      <div className="mt-1 flex items-baseline gap-1.5 font-mono-tabular text-xs tabular-nums">
+        <span className="font-bold text-ink">
+          {datum.exactPct.toFixed(1).replace('.', ',')}%
+        </span>
+        <span className="text-ink-muted" aria-hidden="true">
+          ·
+        </span>
+        <span className="text-ink-muted">{formatBRL(datum.value)}</span>
+      </div>
+    </div>
+  );
+};
 
 export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
   list,
@@ -23,6 +79,7 @@ export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
   const [budgetInput, setBudgetInput] = useState('');
   const [copied, setCopied] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [activeCategoryId, setActiveCategoryId] = useState<CategoryId | null>(null);
 
   const totalCount = list.items.length;
   const checkedCount = list.items.filter((i) => i.checked).length;
@@ -35,6 +92,51 @@ export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
   const inCartTotal = list.items
     .filter((i) => i.checked)
     .reduce((sum, i) => sum + (i.price !== null ? i.price * i.quantity : 0), 0);
+
+  const categoryBreakdown = useMemo<CategorySpendDatum[]>(() => {
+    if (estimatedTotal <= 0) return [];
+
+    const totalsByCategory = new Map<CategoryId, number>();
+    for (const item of list.items) {
+      if (item.price === null || item.price <= 0) continue;
+      const lineValue = item.price * item.quantity;
+      if (lineValue <= 0) continue;
+      totalsByCategory.set(item.category, (totalsByCategory.get(item.category) ?? 0) + lineValue);
+    }
+
+    const sorted = Array.from(totalsByCategory.entries())
+      .map(([id, value]) => ({
+        id,
+        label: CATEGORY_MAP[id]?.label ?? 'Outros',
+        value: Number(value.toFixed(2)),
+        exactPct: (value / estimatedTotal) * 100,
+        color: CATEGORY_CHART_COLORS[id] ?? CATEGORY_CHART_COLORS.outros,
+      }))
+      .sort((a, b) => b.value - a.value);
+
+    // Largest-remainder rounding so displayed integer percentages sum to 100%
+    const floors = sorted.map((entry) => Math.floor(entry.exactPct));
+    const remainder = 100 - floors.reduce((sum, n) => sum + n, 0);
+    const byFraction = sorted
+      .map((entry, idx) => ({ idx, frac: entry.exactPct - floors[idx] }))
+      .sort((a, b) => b.frac - a.frac);
+    for (let i = 0; i < remainder && i < byFraction.length; i++) {
+      floors[byFraction[i].idx] += 1;
+    }
+
+    return sorted.map((entry, idx) => ({
+      ...entry,
+      pct: floors[idx],
+    }));
+  }, [list.items, estimatedTotal]);
+
+  const highlightedCategory = useMemo(
+    () =>
+      activeCategoryId
+        ? categoryBreakdown.find((c) => c.id === activeCategoryId) ?? null
+        : null,
+    [activeCategoryId, categoryBreakdown]
+  );
 
   const hasBudget = list.budget !== null && list.budget > 0;
   const isOverBudget = hasBudget && list.budget !== null && estimatedTotal > list.budget;
@@ -178,6 +280,140 @@ export const ListSummaryCard: React.FC<ListSummaryCardProps> = ({
                 {formatBRL(estimatedTotal - list.budget)}
               </strong>
             </span>
+          </div>
+        )}
+      </div>
+
+      {/* Category spending donut chart */}
+      <div className="mt-4 border-t border-line pt-4">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-xs font-semibold text-ink">Gastos por categoria</h3>
+          {categoryBreakdown.length > 0 && (
+            <span className="font-mono-tabular text-[11px] text-ink-muted tabular-nums">
+              {categoryBreakdown.length}{' '}
+              {categoryBreakdown.length === 1 ? 'categoria' : 'categorias'}
+            </span>
+          )}
+        </div>
+
+        {categoryBreakdown.length === 0 ? (
+          <p className="mt-2 text-xs text-ink-muted">
+            Adicione preços aos itens para ver a distribuição por categoria.
+          </p>
+        ) : (
+          <div className="mt-2">
+            <div className="relative h-[160px] w-full">
+              <ResponsiveContainer
+                width="100%"
+                height={160}
+                initialDimension={{ width: 220, height: 160 }}
+              >
+                <PieChart>
+                  <Pie
+                    data={categoryBreakdown}
+                    dataKey="value"
+                    nameKey="label"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={47}
+                    outerRadius={68}
+                    paddingAngle={categoryBreakdown.length > 1 ? 2 : 0}
+                    cornerRadius={4}
+                    stroke="none"
+                    isAnimationActive={false}
+                    onMouseEnter={(_, index) =>
+                      setActiveCategoryId(categoryBreakdown[index]?.id ?? null)
+                    }
+                    onMouseLeave={() => setActiveCategoryId(null)}
+                    onClick={(_, index) => {
+                      const clickedId = categoryBreakdown[index]?.id ?? null;
+                      setActiveCategoryId((prev) => (prev === clickedId ? null : clickedId));
+                    }}
+                  >
+                    {categoryBreakdown.map((entry) => {
+                      const isDimmed =
+                        activeCategoryId !== null && activeCategoryId !== entry.id;
+                      return (
+                        <Cell
+                          key={entry.id}
+                          fill={entry.color}
+                          fillOpacity={isDimmed ? 0.35 : 1}
+                          style={{ cursor: 'pointer', transition: 'fill-opacity 150ms ease' }}
+                        />
+                      );
+                    })}
+                  </Pie>
+                  <Tooltip content={<CategoryChartTooltip />} />
+                </PieChart>
+              </ResponsiveContainer>
+
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-12 text-center">
+                {highlightedCategory ? (
+                  <>
+                    <span className="font-mono-tabular text-base font-bold leading-tight text-ink tabular-nums">
+                      {highlightedCategory.exactPct < 0.5
+                        ? '<1%'
+                        : `${highlightedCategory.pct}%`}
+                    </span>
+                    <span className="mt-0.5 max-w-[84px] truncate text-[10.5px] font-medium leading-tight text-ink-muted">
+                      {highlightedCategory.label}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[10.5px] font-medium leading-tight text-ink-muted">
+                      Total
+                    </span>
+                    <span className="mt-0.5 max-w-[88px] truncate font-mono-tabular text-[13px] font-bold leading-tight text-ink tabular-nums">
+                      {formatBRL(estimatedTotal)}
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <ul className="mt-1 space-y-0.5" aria-label="Categorias por percentual de gasto">
+              {categoryBreakdown.map((cat) => {
+                const isSelected = activeCategoryId === cat.id;
+                const pctDisplay = cat.exactPct > 0 && cat.exactPct < 0.5 ? '<1%' : `${cat.pct}%`;
+                return (
+                  <li key={cat.id}>
+                    <button
+                      type="button"
+                      aria-pressed={isSelected}
+                      onMouseEnter={() => setActiveCategoryId(cat.id)}
+                      onMouseLeave={() => setActiveCategoryId(null)}
+                      onClick={() =>
+                        setActiveCategoryId((prev) => (prev === cat.id ? null : cat.id))
+                      }
+                      className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-accent ${
+                        isSelected ? 'bg-surface-muted' : 'hover:bg-surface-muted/60'
+                      }`}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span
+                          className="h-2.5 w-2.5 shrink-0 rounded-xs"
+                          style={{ backgroundColor: cat.color }}
+                          aria-hidden="true"
+                        />
+                        <span className="truncate text-xs font-medium text-ink">
+                          {cat.label}
+                        </span>
+                      </span>
+                      <span className="flex shrink-0 items-baseline gap-1.5 font-mono-tabular text-xs tabular-nums">
+                        <span className="font-semibold text-ink">{pctDisplay}</span>
+                        <span className="text-ink-muted" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="text-[11px] text-ink-muted">
+                          {formatBRL(cat.value)}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         )}
       </div>
